@@ -39,7 +39,7 @@ from backend.agent import (
 )
 from backend.config import get_settings
 from backend.memory.db import get_pool
-from backend.skills import get_tool_definitions, SKILL_REGISTRY
+from backend.skills import get_tool_definitions, SKILL_REGISTRY, TOOL_DEFINITIONS
 
 
 # ---------------------------------------------------------------------------
@@ -175,10 +175,22 @@ async def test_agent_sse_event_format(client: AsyncClient):
 
 @pytest.mark.asyncio
 async def test_agent_skill_registry_has_new_skills(client: AsyncClient):
-    """Verify update_task_status, edit_task, delete_task are registered skill handlers."""
-    assert "update_task_status" in SKILL_REGISTRY
-    assert "edit_task" in SKILL_REGISTRY
-    assert "delete_task" in SKILL_REGISTRY
+    """Verify all README skills table tools are genuinely registered and dispatchable."""
+    readme_skills = [
+        "add_task",
+        "query_tasks",
+        "update_task_status",
+        "edit_task",
+        "delete_task",
+        "list_projects",
+        "log_code_context",
+        "query_code_context",
+        "query_coursework_notes",
+    ]
+    tool_names = [t["function"]["name"] for t in TOOL_DEFINITIONS]
+    for skill in readme_skills:
+        assert skill in SKILL_REGISTRY, f"Skill '{skill}' missing from SKILL_REGISTRY"
+        assert skill in tool_names, f"Tool '{skill}' missing from TOOL_DEFINITIONS"
 
 
 # ---------------------------------------------------------------------------

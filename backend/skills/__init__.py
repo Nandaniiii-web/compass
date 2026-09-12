@@ -166,6 +166,23 @@ LOG_CODE_SNIPPET_TOOL: Dict[str, Any] = {
     }
 }
 
+LOG_CODE_CONTEXT_TOOL: Dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "log_code_context",
+        "description": "Store technical architecture notes, code snippets, or configuration in vector memory.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "content": {"type": "string", "description": "The code snippet or technical summary"},
+                "project": {"type": "string", "description": "Target project"},
+                "tags": {"type": "string", "description": "Comma-separated tags"}
+            },
+            "required": ["content"]
+        }
+    }
+}
+
 SEARCH_WEB_TOOL: Dict[str, Any] = {
     "type": "function",
     "function": {
@@ -265,18 +282,58 @@ DELETE_TASK_TOOL: Dict[str, Any] = {
     },
 }
 
+LIST_PROJECTS_TOOL: Dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "list_projects",
+        "description": "List all tracked projects partitioned across domains.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "domain": {
+                    "type": "string",
+                    "enum": ["hackathon", "coursework", "code", "general"],
+                    "description": "Optional domain to filter projects",
+                },
+            },
+            "required": [],
+        },
+    },
+}
+
+QUERY_COURSEWORK_NOTES_TOOL: Dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "query_coursework_notes",
+        "description": "Searches and retrieves academic coursework notes and syllabus items.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Search topic or course concept (e.g. RISC-V, hazards, calculus)",
+                },
+            },
+            "required": ["query"],
+        },
+    },
+}
+
 # Registered tools exposed to the Nemotron router
 BASE_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
     ADD_TASK_TOOL,
     QUERY_TASKS_TOOL,
     QUERY_COURSEWORK_TASKS_TOOL,
+    QUERY_COURSEWORK_NOTES_TOOL,
     GET_HACKATHON_DEADLINES_TOOL,
     LOG_CODE_SNIPPET_TOOL,
+    LOG_CODE_CONTEXT_TOOL,
     QUERY_CODE_CONTEXT_TOOL,
     SUMMARIZE_DAY_TOOL,
     UPDATE_TASK_STATUS_TOOL,
     EDIT_TASK_TOOL,
     DELETE_TASK_TOOL,
+    LIST_PROJECTS_TOOL,
 ]
 
 
@@ -667,6 +724,29 @@ async def handle_delete_task(args: Dict[str, Any], pool: Any) -> Dict[str, Any]:
         return {"response": f"Task #{task_id} not found.", "data": {"deleted": False}}
     except Exception as e:
         return {"response": f"Failed to delete task: {e}", "data": {"error": str(e)}}
+
+
+@register_skill("list_projects")
+async def handle_list_projects(args: Dict[str, Any], pool: Any) -> Dict[str, Any]:
+    """List all tracked projects via structured.list_projects."""
+    from backend.memory import structured
+    domain = args.get("domain")
+    async with pool.acquire() as conn:
+        projects = await structured.list_projects(conn)
+    if domain:
+        projects = [p for p in projects if p.get("domain") == domain]
+    p_names = [f"'{p['name']}' ({p.get('domain', 'general')})" for p in projects]
+    summary = f"Found {len(projects)} tracked project(s): {', '.join(p_names)}." if projects else "No tracked projects found."
+    return {
+        "response": summary,
+        "data": {"projects": projects, "count": len(projects)},
+    }
+
+
+@register_skill("query_coursework_notes")
+async def handle_query_coursework_notes(args: Dict[str, Any], pool: Any) -> Dict[str, Any]:
+    """Search coursework notes using vector memory search."""
+    return await handle_query_code_context(args, pool)
 
 
 async def dispatch_skill(skill_name: str, args: Dict[str, Any], pool: Any) -> Dict[str, Any]:
