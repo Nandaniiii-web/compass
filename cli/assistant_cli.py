@@ -32,6 +32,7 @@ if sys.platform == "win32":
 import httpx
 import typer
 from dotenv import load_dotenv
+from rich import box
 from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Prompt
@@ -603,7 +604,318 @@ def admin_consolidate(
 
 
 # ---------------------------------------------------------------------------
+# Agent — Autonomous ReAct multi-step planner
+# ---------------------------------------------------------------------------
+@app.command()
+def agent(
+    goal: str = typer.Argument(..., help="The goal for the agent to accomplish"),
+    max_steps: int = typer.Option(8, "--max-steps", "-m", help="Max reasoning steps"),
+    no_critic: bool = typer.Option(False, "--no-critic", help="Disable self-critique pass"),
+    demo_reject: bool = typer.Option(False, "--demo-reject", help="Run in pre-loaded reject-path demo mode"),
+):
+    """🧠 Run the autonomous agent to plan, analyze, and act on your tasks.
+
+    The agent reasons step-by-step, calling tools autonomously to gather data
+    and propose solutions. State-mutating actions require your confirmation.
+
+    Examples:
+        compass agent "Plan my week considering all deadlines"
+        compass agent "Flag deadline conflicts and suggest resolutions"
+        compass agent "Write a retrospective for the Compass project"
+        compass agent --demo-reject "Reschedule conflicting tasks"
+    """
+    import json as _json
+
+    console.print(Panel(
+        f"[bold]Goal:[/] {goal}\n"
+        f"[dim]Max steps: {max_steps} | Critic: {'disabled' if no_critic else 'enabled'}[/]",
+        title="🧠 Compass Agent",
+        border_style="blue",
+    ))
+
+    # Step type → Rich style mapping
+    STEP_COLORS = {
+        "think": ("bold blue", "🧠 THINKING"),
+        "tool_call": ("bold yellow", "🔧 TOOL CALL"),
+        "observe": ("bold green", "👁️ RESULT"),
+        "confirm_request": ("bold red", "⚠️ CONFIRM"),
+        "critic": ("bold magenta", "⚖️ SELF-CRITIQUE"),
+        "synthesize": ("bold cyan", "✨ SYNTHESIS"),
+        "error": ("bold red", "❌ ERROR"),
+        "done": ("bold green", "✅ COMPLETE"),
+    }
+
+    pending_actions = []
+    run_id = None
+
+    try:
+        with httpx.stream(
+            "POST",
+            f"{API_BASE}/api/agent/run",
+            json={
+                "goal": goal,
+                "max_steps": max_steps,
+                "enable_critic": not no_critic,
+                "confirmed_actions": [],
+            },
+            timeout=120.0,
+        ) as response:
+            response.raise_for_status()
+            buffer = ""
+            for chunk in response.iter_text():
+                buffer += chunk
+                while "\n" in buffer:
+                    line, buffer = buffer.split("\n", 1)
+                    line = line.strip()
+                    if not line.startswith("data: "):
+                        continue
+
+                    try:
+                        event = _json.loads(line[6:])
+                    except _json.JSONDecodeError:
+                        continue
+
+                    if event.get("run_id"):
+                        run_id = event["run_id"]
+
+                    step_type = event.get("type", "think")
+                    content = event.get("content", "")
+                    step_n = event.get("step", 0)
+                    elapsed = event.get("elapsed_ms", 0)
+                    tool = event.get("tool", "")
+                    args = event.get("args", {})
+
+                    color, label = STEP_COLORS.get(step_type, ("dim", "STEP"))
+
+                    if step_type == "tool_call":
+                        args_str = _json.dumps(args) if args else ""
+                        console.print(Panel(
+                            f"[yellow]{tool}[/]({args_str})",
+                            title=f"[{color}]{label}[/] [dim]Step {step_n} · {elapsed}ms[/]",
+                            border_style="yellow",
+                            padding=(0, 1),
+                        ))
+                    elif step_type == "confirm_request":
+                        console.print(Panel(
+                            content,
+                            title=f"[{color}]{label}[/]",
+                            border_style="red",
+                            padding=(0, 1),
+                        ))
+                        pending_actions.append({"tool": tool, "args": args})
+                    elif step_type == "done":
+                        try:
+                            done_data = _json.loads(content)
+                            tools_list = ", ".join(done_data.get("tools_used", [])) or "none"
+                            total = done_data.get("total_steps", 0)
+                            pending_count = len(done_data.get("pending_confirmations", []))
+                            done_text = f"Completed in {total} steps. Tools: {tools_list}."
+                            if pending_count > 0:
+                                done_text += f"\n⚠️ {pending_count} action(s) pending your approval."
+                            console.print(Panel(done_text, title=f"[{color}]{label}[/]", border_style="green"))
+                        except _json.JSONDecodeError:
+                            console.print(Panel(content, title=f"[{color}]{label}[/]", border_style="green"))
+                    else:
+                        border = color.split()[-1] if " " in color else "blue"
+                        console.print(Panel(
+                            content,
+                            title=f"[{color}]{label}[/] [dim]Step {step_n} · {elapsed}ms[/]",
+                            border_style=border,
+                            padding=(0, 1),
+                        ))
+
+    except httpx.HTTPStatusError as e:
+        console.print(f"[compass.error]❌ Agent request failed: {e.response.status_code}[/]")
+        return
+    except httpx.ConnectError:
+        console.print(f"[compass.error]❌ Cannot connect to backend at {API_BASE}[/]")
+        return
+
+    # Handle pending confirmations interactively
+    if pending_actions:
+        console.print()
+        console.print(f"[bold red]⚠️ {len(pending_actions)} action(s) need your approval:[/]")
+        for i, action in enumerate(pending_actions):
+            console.print(f"  {i+1}. [yellow]{action['tool']}[/]({_json.dumps(action['args'])})")
+
+        if demo_reject:
+            console.print("[yellow]⚡ Demo Trigger: Simulating user decline for deadline conflict...[/]")
+            confirm = "no"
+            feedback = "Do not move OS Homework 2 deadline"
+        else:
+            confirm = Prompt.ask("\nApprove these actions?", choices=["yes", "no"], default="no")
+            feedback = None
+
+        if confirm == "yes":
+            console.print("[green]Executing approved actions...[/]")
+            try:
+                resp = httpx.post(
+                    f"{API_BASE}/api/agent/confirm",
+                    json={"actions": pending_actions, "run_id": run_id if 'run_id' in locals() else None},
+                    headers={"Authorization": f"Bearer {AUTH_TOKEN}"},
+                    timeout=30.0,
+                )
+                resp.raise_for_status()
+                results = resp.json().get("results", [])
+                for r in results:
+                    status = r.get("status", "unknown")
+                    tool_name = r.get("tool", "")
+                    if status == "success":
+                        console.print(f"  ✅ {tool_name}: success")
+                    else:
+                        console.print(f"  ❌ {tool_name}: {r.get('message', 'failed')}")
+            except Exception as e:
+                console.print(f"[compass.error]❌ Failed to execute actions: {e}[/]")
+        else:
+            if not feedback:
+                feedback = Prompt.ask("Reason / alternative plan instruction (optional)", default="User rejected this action")
+            console.print(f"[dim]Actions rejected ({feedback}). Feeding rejection back to agent for re-planning...[/]")
+            active_rid = run_id if 'run_id' in locals() else None
+            if active_rid:
+                try:
+                    with httpx.stream(
+                        "POST",
+                        f"{API_BASE}/api/agent/run",
+                        json={
+                            "run_id": active_rid,
+                            "action": "reject",
+                            "feedback": feedback,
+                        },
+                        timeout=120.0,
+                    ) as resp:
+                        resp.raise_for_status()
+                        buf = ""
+                        for ch in resp.iter_text():
+                            buf += ch
+                            while "\n" in buf:
+                                l, buf = buf.split("\n", 1)
+                                l = l.strip()
+                                if not l.startswith("data: "):
+                                    continue
+                                try:
+                                    ev = _json.loads(l[6:])
+                                except Exception:
+                                    continue
+                                stype = ev.get("type", "think")
+                                c = ev.get("content", "")
+                                col, lbl = STEP_COLORS.get(stype, ("dim", "STEP"))
+                                if stype == "synthesize":
+                                    console.print(Panel(c, title=f"[{col}]{lbl}[/]", border_style="cyan"))
+                                elif stype != "done":
+                                    console.print(Panel(c, title=f"[{col}]{lbl}[/]", border_style="blue", padding=(0, 1)))
+                except Exception as ex:
+                    console.print(f"[compass.error]❌ Re-planning failed: {ex}[/]")
+
+
+@app.command("agent-undo")
+def agent_undo(
+    run_id: Optional[str] = typer.Option(None, "--run-id", "-r", help="Specific run ID to revert"),
+    log_id: Optional[int] = typer.Option(None, "--log-id", "-l", help="Specific audit log entry ID to revert"),
+):
+    """Revert an agent-executed mutation using the audit log."""
+    try:
+        resp = httpx.post(
+            f"{API_BASE}/api/agent/undo",
+            json={"run_id": run_id, "audit_log_id": log_id},
+            headers={"Authorization": f"Bearer {AUTH_TOKEN}"},
+            timeout=30.0,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("status") == "ok":
+            console.print(f"[green]✅ {data.get('message')}[/]")
+            if "reverted" in data:
+                console.print(f"[dim]Reverted: {data['reverted']}[/]")
+        else:
+            console.print(f"[yellow]⚠️ {data.get('message', 'Nothing to undo')}[/]")
+    except Exception as e:
+        console.print(f"[compass.error]❌ Failed to undo: {e}[/]")
+
+
+@app.command("agent-activity")
+def agent_activity(limit: int = typer.Option(15, "--limit", "-n", help="Number of entries to show")):
+    """📋 View recent agent mutations from the audit log with per-item IDs for undo."""
+    try:
+        resp = httpx.get(f"{API_BASE}/api/agent/activity?limit={limit}", timeout=15.0)
+        resp.raise_for_status()
+        entries = resp.json().get("activity", [])
+
+        if not entries:
+            console.print("[dim]No agent activity recorded yet.[/]")
+            return
+
+        table = Table(
+            title="📋 Agent Activity Log (Audit Trail)",
+            box=box.ROUNDED,
+            header_style="bold cyan",
+        )
+        table.add_column("Log ID", style="bold", justify="right")
+        table.add_column("Tool", style="yellow")
+        table.add_column("Target", style="white")
+        table.add_column("Status", style="bold")
+        table.add_column("Timestamp", style="dim")
+        table.add_column("Run ID", style="dim cyan")
+
+        for item in entries:
+            lid = str(item.get("id", ""))
+            tool = item.get("tool", "")
+            tbl = item.get("affected_table", "tasks")
+            aff_id = str(item.get("affected_id") or "")
+            reverted = item.get("is_reverted", False)
+            st_badge = "[red]REVERTED[/]" if reverted else "[green]ACTIVE[/]"
+            ts = item.get("created_at", "")[:19].replace("T", " ")
+            rid = (item.get("run_id") or "")[:12]
+
+            table.add_row(lid, tool, f"{tbl} #{aff_id}", st_badge, ts, rid)
+
+        console.print(table)
+        console.print("[dim]Revert any mutation using: compass agent-undo --log-id <ID>[/]")
+
+    except Exception as e:
+        console.print(f"[compass.error]❌ Failed to fetch activity: {e}[/]")
+
+
+@app.command("agent-stats")
+def agent_stats():
+    """⚖️ Surface real self-critique pass effectiveness metrics."""
+    try:
+        resp = httpx.get(f"{API_BASE}/api/agent/critique-stats", timeout=15.0)
+        resp.raise_for_status()
+        data = resp.json()
+
+        tot = data.get("total_runs_analyzed", 0)
+        crit = data.get("runs_with_critique", 0)
+        flagged = data.get("critique_issues_flagged", 0)
+        rate = data.get("critique_effectiveness_rate", 0.0)
+
+        panel_content = (
+            f"[bold]Total Agent Runs Analyzed:[/] {tot}\n"
+            f"[bold]Runs with Self-Critique Pass:[/] {crit}\n"
+            f"[bold]Critique Issues Flagged / Revised:[/] [yellow]{flagged}[/]\n"
+            f"[bold]Critique Intervention Rate:[/] [cyan]{rate}%[/]\n\n"
+            "[dim]A single-model self-critique pass checks plan constraints against real database data before final synthesis.[/]"
+        )
+        console.print(Panel(panel_content, title="⚖️ Self-Critique Effectiveness", border_style="magenta"))
+
+        recent = data.get("recent_critique_evaluations", [])
+        if recent:
+            t = Table(title="Recent Self-Critique Evaluations", box=box.SIMPLE, header_style="bold magenta")
+            t.add_column("Run ID", style="dim cyan")
+            t.add_column("Flagged Issue?", justify="center")
+            t.add_column("Critique Summary", style="white")
+
+            for ev in recent[:5]:
+                f_icon = "⚠️ YES" if ev.get("flagged_issue") else "✅ NO"
+                t.add_row(ev.get("run_id", "")[:12], f_icon, ev.get("critique_summary", "")[:80])
+            console.print(t)
+
+    except Exception as e:
+        console.print(f"[compass.error]❌ Failed to fetch critique stats: {e}[/]")
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     app()
+

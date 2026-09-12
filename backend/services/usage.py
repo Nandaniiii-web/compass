@@ -12,17 +12,20 @@ import asyncpg
 logger = logging.getLogger("compass.services.usage")
 
 # Pricing Constants per 1,000,000 tokens (USD)
+# Verified Nebius Token Factory catalog rates:
+# - Nemotron-3 Nano: $0.06 / 1M prompt, $0.24 / 1M completion
+# - Nemotron-3 Super: $0.30 / 1M prompt, $0.90 / 1M completion
 # Note: Nemotron-3 Ultra and Qwen3-Embedding rates are estimated, not independently verified from the dashboard directly.
 PRICING_PER_1M = {
     # Normalized model keys
-    "nemotron-nano": {"prompt": 0.08, "completion": 0.08},
-    "nemotron-super": {"prompt": 0.40, "completion": 0.40},
+    "nemotron-nano": {"prompt": 0.06, "completion": 0.24},
+    "nemotron-super": {"prompt": 0.30, "completion": 0.90},
     "nemotron-ultra": {"prompt": 0.80, "completion": 0.80},
     "qwen3-embedding": {"prompt": 0.02, "completion": 0.00},
     
     # Full Model ID mappings for OpenAI SDK compatibility
-    "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B": {"prompt": 0.08, "completion": 0.08},
-    "nvidia/nemotron-3-super-120b-a12b": {"prompt": 0.40, "completion": 0.40},
+    "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B": {"prompt": 0.06, "completion": 0.24},
+    "nvidia/nemotron-3-super-120b-a12b": {"prompt": 0.30, "completion": 0.90},
     "nvidia/Nemotron-3-Ultra-550b-a55b": {"prompt": 0.80, "completion": 0.80},
     "Qwen/Qwen3-Embedding-8B": {"prompt": 0.02, "completion": 0.00},
 }
@@ -46,7 +49,7 @@ _USAGE_STATE: Dict[str, Dict[str, Any]] = {}
 
 def _record_baseline(m: str, p: int, c: int):
     norm_key = _normalize_model_name(m)
-    pricing = PRICING_PER_1M.get(norm_key, {"prompt": 0.08, "completion": 0.08})
+    pricing = PRICING_PER_1M.get(norm_key, {"prompt": 0.06, "completion": 0.24})
     cost = round((p * pricing["prompt"] / 1_000_000.0) + (c * pricing["completion"] / 1_000_000.0), 6)
     if norm_key not in _USAGE_STATE:
         _USAGE_STATE[norm_key] = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "cost": 0.0}
@@ -157,7 +160,7 @@ def record_usage(
     import asyncio
 
     norm_key = _normalize_model_name(model_name)
-    pricing = PRICING_PER_1M.get(norm_key, {"prompt": 0.08, "completion": 0.08})
+    pricing = PRICING_PER_1M.get(norm_key, {"prompt": 0.06, "completion": 0.24})
 
     cost = (prompt_tokens * pricing["prompt"] / 1_000_000.0) + (
         completion_tokens * pricing["completion"] / 1_000_000.0

@@ -40,7 +40,7 @@ settings = get_settings()
 async def db_conn():
     """Fixture providing an isolated PostgreSQL connection wrapped in a transaction that rolls back."""
     try:
-        conn = await asyncpg.connect(settings.DATABASE_URL, timeout=3.0)
+        conn = await asyncpg.connect(settings.DATABASE_URL, timeout=15.0)
     except Exception as e:
         pytest.skip(f"PostgreSQL database not reachable at {settings.DATABASE_URL}: {e}")
 

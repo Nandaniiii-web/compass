@@ -121,3 +121,46 @@ CREATE TABLE usage_log (
 
 CREATE INDEX idx_usage_log_model      ON usage_log(model);
 CREATE INDEX idx_usage_log_created_at ON usage_log(created_at);
+
+-- ============================================================
+-- Agent Runs — persistent ReAct agent execution state
+-- ============================================================
+CREATE TABLE IF NOT EXISTS agent_runs (
+    id                 TEXT          PRIMARY KEY,
+    goal               TEXT          NOT NULL,
+    status             TEXT          NOT NULL CHECK (status IN ('running', 'paused', 'completed', 'expired', 'rejected', 'failed')),
+    accumulated_steps  JSONB         NOT NULL DEFAULT '[]'::jsonb,
+    messages           JSONB         NOT NULL DEFAULT '[]'::jsonb,
+    pending_actions    JSONB         NOT NULL DEFAULT '[]'::jsonb,
+    created_at         TIMESTAMPTZ   NOT NULL DEFAULT now(),
+    updated_at         TIMESTAMPTZ   NOT NULL DEFAULT now()
+);
+
+CREATE TRIGGER update_agent_runs_modtime
+    BEFORE UPDATE ON agent_runs
+    FOR EACH ROW
+    EXECUTE FUNCTION update_modified_column();
+
+CREATE INDEX IF NOT EXISTS idx_agent_runs_status     ON agent_runs(status);
+CREATE INDEX IF NOT EXISTS idx_agent_runs_created_at ON agent_runs(created_at);
+
+-- ============================================================
+-- Agent Audit Log — audit trail for agent-executed mutations
+-- ============================================================
+CREATE TABLE IF NOT EXISTS agent_audit_log (
+    id                 SERIAL        PRIMARY KEY,
+    run_id             TEXT,
+    tool               TEXT          NOT NULL,
+    args               JSONB         NOT NULL DEFAULT '{}'::jsonb,
+    affected_table     TEXT          NOT NULL DEFAULT 'tasks',
+    affected_id        INTEGER,
+    previous_state     JSONB,
+    new_state          JSONB,
+    approved_by        TEXT          NOT NULL DEFAULT 'user',
+    is_reverted        BOOLEAN       NOT NULL DEFAULT FALSE,
+    created_at         TIMESTAMPTZ   NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_audit_log_run_id     ON agent_audit_log(run_id);
+CREATE INDEX IF NOT EXISTS idx_agent_audit_log_created_at ON agent_audit_log(created_at);
+

@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react'
 import Sidebar from './components/Sidebar'
 import Timeline from './components/Timeline'
 import ChatPanel from './components/ChatPanel'
+import AgentPanel from './components/AgentPanel'
 import { checkBackendHealth, fetchTasks, sendQueryToAssistant, fetchUsageSummary } from './api/client'
 
 export default function App() {
@@ -168,6 +169,21 @@ export default function App() {
               }}>
               💬 Assistant Chat
             </button>
+            <button
+              id="tab-agent"
+              onClick={() => setActiveTab('agent')}
+              style={{
+                padding: '7px 14px',
+                borderRadius: '6px',
+                border: 'none',
+                background: activeTab === 'agent' ? '#1e293b' : 'transparent',
+                color: activeTab === 'agent' ? '#fff' : '#64748b',
+                cursor: 'pointer',
+                fontWeight: '500',
+                fontSize: '13px'
+              }}>
+              🧠 Agent Planner
+            </button>
           </div>
           {/* P0.2: Live usage counter — updates after every chat message */}
           <div id="usage-badge" className="header-model-badge" style={{ fontSize: '11px', color: '#64748b', fontFamily: 'JetBrains Mono, monospace' }}>
@@ -181,6 +197,8 @@ export default function App() {
             activeDomain={selectedDomain}
             onSelectDomain={setSelectedDomain}
           />
+        ) : activeTab === 'agent' ? (
+          <AgentPanel />
         ) : (
           <ChatPanel
             messages={messages}

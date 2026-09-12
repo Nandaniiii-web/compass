@@ -92,6 +92,11 @@ _RATE_LIMIT_MAX_REQUESTS = 30
 _rate_store: dict = defaultdict(deque)  # ip -> deque of timestamps
 
 
+_AGENT_RATE_LIMIT_WINDOW_SECONDS = 60
+_AGENT_RATE_LIMIT_MAX_REQUESTS = 10
+_agent_rate_store: dict = defaultdict(deque)  # ip -> deque of timestamps
+
+
 async def rate_limit(request: Request) -> None:
     """Sliding-window rate limiter: 30 requests/min per client IP on chat endpoints.
     Returns HTTP 429 Too Many Requests with Retry-After header when exceeded.
@@ -112,6 +117,30 @@ async def rate_limit(request: Request) -> None:
         raise HTTPException(
             status_code=429,
             detail=f"Rate limit exceeded. Max {_RATE_LIMIT_MAX_REQUESTS} requests per minute per IP.",
+            headers={"Retry-After": str(retry_after)},
+        )
+
+    q.append(now)
+
+
+async def agent_rate_limit(request: Request) -> None:
+    """Separate sliding-window rate limiter for agent runs: 10 requests/min per client IP.
+    Returns HTTP 429 Too Many Requests with Retry-After header when exceeded.
+    """
+    client_ip = request.headers.get("X-Forwarded-For", request.client.host if request.client else "unknown")
+    client_ip = client_ip.split(",")[0].strip()
+    now = time.monotonic()
+    window_start = now - _AGENT_RATE_LIMIT_WINDOW_SECONDS
+
+    q = _agent_rate_store[client_ip]
+    while q and q[0] < window_start:
+        q.popleft()
+
+    if len(q) >= _AGENT_RATE_LIMIT_MAX_REQUESTS:
+        retry_after = int(_AGENT_RATE_LIMIT_WINDOW_SECONDS - (now - q[0])) + 1
+        raise HTTPException(
+            status_code=429,
+            detail=f"Agent rate limit exceeded. Max {_AGENT_RATE_LIMIT_MAX_REQUESTS} runs per minute per IP.",
             headers={"Retry-After": str(retry_after)},
         )
 
@@ -917,3 +946,207 @@ async def stream_chat(req: StreamChatRequest, _rl: None = Depends(rate_limit)):
             "X-Accel-Buffering": "no",
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# Agent Endpoints — ReAct autonomous multi-step planner
+# ---------------------------------------------------------------------------
+
+import json as _json  # avoid shadowing
+
+class AgentRequest(BaseModel):
+    """Request to launch or resume the autonomous agent."""
+    goal: str = ""
+    max_steps: int = 8
+    enable_critic: bool = True
+    confirmed_actions: list[dict] = []
+    run_id: Optional[str] = None
+    action: Optional[str] = None           # "approve" | "reject"
+    feedback: Optional[str] = None         # User rejection feedback for re-planning
+    confirm_timeout_seconds: float = 300.0
+    wait_for_confirmation: bool = False
+
+
+class AgentConfirmRequest(BaseModel):
+    """Request to execute confirmed agent actions."""
+    actions: list[dict]
+    run_id: Optional[str] = None
+
+
+class AgentUndoRequest(BaseModel):
+    """Request to revert an agent mutation."""
+    run_id: Optional[str] = None
+    audit_log_id: Optional[int] = None
+
+
+@app.post("/api/agent/run", dependencies=[Depends(agent_rate_limit)])
+async def agent_run(req: AgentRequest, request: Request):
+    """Stream the agent's ReAct execution trace via SSE.
+
+    The agent reasons autonomously, calling tools in sequence. State-mutating
+    tools emit a "confirm_request" event and halt execution until explicit
+    user approval or rejection is provided.
+
+    SSE event types:
+      - think: Agent's reasoning text
+      - tool_call: Tool being called (name + args)
+      - observe: Tool execution result or decline feedback
+      - confirm_request: Mutating action awaiting user approval
+      - critic: Self-critique of proposed plan
+      - synthesize: Final comprehensive answer
+      - error: Something went wrong
+      - done: Run complete with summary metadata
+    """
+    from backend.agent import run_agent, _PENDING_CONFIRMATION_EVENTS, count_active_agent_runs, MAX_CONCURRENT_AGENT_RUNS
+
+    # If an in-flight SSE stream is waiting on this run_id, signal it
+    if req.run_id and req.run_id in _PENDING_CONFIRMATION_EVENTS and req.action:
+        evt, outcome = _PENDING_CONFIRMATION_EVENTS[req.run_id]
+        outcome["action"] = req.action
+        outcome["feedback"] = req.feedback or ""
+        evt.set()
+        return {"status": "ok", "message": f"Action '{req.action}' delivered to active run {req.run_id}."}
+
+    pool = await get_pool()
+
+    # Cap concurrent active agent runs (only on new runs, not when resuming/approving)
+    if not req.action and not req.run_id:
+        active_count = await count_active_agent_runs(pool)
+        if active_count >= MAX_CONCURRENT_AGENT_RUNS:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Concurrent active agent runs cap reached ({active_count}/{MAX_CONCURRENT_AGENT_RUNS}). Please complete or wait for existing runs to finish.",
+            )
+
+    async def agent_event_generator():
+        try:
+            async for step in run_agent(
+                goal=req.goal,
+                pool=pool,
+                max_steps=req.max_steps,
+                enable_critic=req.enable_critic,
+                confirmed_actions=req.confirmed_actions,
+                run_id=req.run_id,
+                action=req.action,
+                feedback=req.feedback,
+                confirm_timeout_seconds=req.confirm_timeout_seconds,
+                wait_for_confirmation=req.wait_for_confirmation,
+            ):
+                yield step.to_sse()
+        except Exception as e:
+            logger.error(f"Agent stream error: {e}")
+            yield f"data: {_json.dumps({'type': 'error', 'content': str(e)})}\n\n"
+
+    return StreamingResponse(
+        agent_event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.post("/api/agent/confirm", dependencies=[Depends(verify_token)])
+async def agent_confirm(req: AgentConfirmRequest):
+    """Execute previously confirmed state-mutating actions from an agent run.
+
+    Logs every executed mutation into agent_audit_log.
+    """
+    from backend.agent import execute_confirmed_actions
+
+    pool = await get_pool()
+    results = await execute_confirmed_actions(req.actions, pool, run_id=req.run_id)
+    return {"status": "ok", "results": results}
+
+
+@app.post("/api/agent/undo", dependencies=[Depends(verify_token)])
+async def agent_undo(req: AgentUndoRequest):
+    """Revert an agent-executed mutation using agent_audit_log."""
+    from backend.agent import undo_last_agent_action
+
+    pool = await get_pool()
+    result = await undo_last_agent_action(pool, run_id=req.run_id, audit_log_id=req.audit_log_id)
+    return result
+
+
+@app.get("/api/agent/activity")
+async def agent_activity(limit: int = 30):
+    """Retrieve recent agent audit log entries for the Agent Activity feed."""
+    pool = await get_pool()
+    if not pool:
+        return {"activity": []}
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, run_id, tool, args, affected_table, affected_id, previous_state, new_state, approved_by, is_reverted, created_at "
+            "FROM agent_audit_log ORDER BY id DESC LIMIT $1",
+            limit
+        )
+    return {
+        "activity": [
+            {
+                "id": r["id"],
+                "run_id": r["run_id"],
+                "tool": r["tool"],
+                "args": r["args"],
+                "affected_table": r["affected_table"],
+                "affected_id": r["affected_id"],
+                "previous_state": r["previous_state"],
+                "new_state": r["new_state"],
+                "approved_by": r["approved_by"],
+                "is_reverted": r.get("is_reverted", False),
+                "created_at": r["created_at"].isoformat() if hasattr(r["created_at"], "isoformat") else str(r["created_at"]),
+            }
+            for r in rows
+        ]
+    }
+
+
+@app.get("/api/agent/critique-stats")
+async def agent_critique_stats():
+    """Surface critique effectiveness metrics computed from persisted agent runs."""
+    from backend.agent import get_critique_stats
+
+    pool = await get_pool()
+    stats = await get_critique_stats(pool)
+    return stats
+
+
+@app.get("/api/agent/runs/{run_id}")
+async def agent_get_run(run_id: str):
+    """Fetch persistent agent run state by run_id."""
+    from backend.agent import get_agent_run
+
+    pool = await get_pool()
+    run = await get_agent_run(pool, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail=f"Agent run '{run_id}' not found.")
+    return run
+
+
+@app.get("/api/agent/capabilities")
+async def agent_capabilities():
+    """Return the list of tools the agent has access to.
+
+    Dynamically queries get_tool_definitions() to respect TAVILY_ENABLED gate.
+    """
+    from backend.skills import get_tool_definitions
+
+    tools = []
+    for t in get_tool_definitions():
+        func = t.get("function", {})
+        tools.append({
+            "name": func.get("name", ""),
+            "description": func.get("description", ""),
+            "parameters": list(func.get("parameters", {}).get("properties", {}).keys()),
+        })
+
+    return {
+        "tools": tools,
+        "total": len(tools),
+        "models": {
+            "reasoning": settings.SKILL_MODEL,
+            "synthesis": settings.SYNTHESIS_MODEL,
+            "routing": settings.ROUTER_MODEL,
+        },
+    }

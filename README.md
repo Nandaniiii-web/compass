@@ -174,6 +174,9 @@ compass log "Integrated Matryoshka 768-dim embeddings with Nebius Token Factory"
 # Ask questions with conversational multi-turn recall
 compass ask "What are my upcoming deliverables before Friday?"
 
+# Launch the autonomous ReAct agent (plans, queries tools, proposes replan with confirmation gate)
+compass agent "Plan my week considering all hackathon deadlines and coursework"
+
 # Inspect model token consumption and estimated API costs
 compass admin usage
 ```
@@ -181,8 +184,22 @@ compass admin usage
 ### 6. Running the Test Suite
 ```powershell
 python -m pytest tests -v
-# 37 passed, 0 skipped, 0 failed in ~78s (Python 3.12+)
+# 44 passed, 0 skipped, 0 failed in ~60s (Python 3.12+)
 ```
+
+---
+
+## Autonomous ReAct Agent Engine
+
+Compass features an autonomous **ReAct (Reason + Act)** agent loop (`backend/agent.py`) built specifically for complex task planning and deadline resolution:
+
+- **Multi-Step Reasoning Loop**: Nemotron-3 Super (120B) autonomously formulates thoughts, decides on tools to invoke, and observes results in a loop capped at a configurable step limit (default 8).
+- **Human-in-the-Loop Confirmation Gate**: Read-only tools (`query_tasks`, `query_coursework_tasks`, `get_hackathon_deadlines`, `query_code_context`, `summarize_day`) execute immediately. State-mutating tools (`add_task`, `edit_task`, `update_task_status`, `delete_task`) generate a `confirm_request` SSE event and are held in staging until the user explicitly reviews and approves them via the Web UI or CLI.
+- **Self-Critique Reflection Pass**: Before final synthesis, a critic evaluation reviews the proposed plan against constraints, flags potential oversights, and refines the recommendation.
+- **Final Cross-Domain Synthesis**: Nemotron-3 Ultra (550B) synthesizes the final comprehensive execution roadmap from the aggregated tool outputs.
+- **Interactive Traces Across Surfaces**:
+  - **Web Dashboard**: The **🧠 Agent Planner** tab streams the real-time reasoning trace with color-coded step cards (`THINK`, `TOOL CALL`, `RESULT`, `CONFIRMATION REQUIRED`, `SELF-CRITIQUE`, `SYNTHESIS`) and one-click **Approve & Execute** / **Reject** buttons.
+  - **Terminal CLI**: `compass agent "<goal>"` renders styled Rich step panels with interactive y/N confirmation prompts for staged modifications.
 
 ---
 
@@ -226,12 +243,13 @@ Compass provides 8 core memory skills, a conversational fallback, and a cross-do
 
 ## Testing
 
-Compass includes an automated regression test suite (**37 tests**, 100% passing, 0 skipped) covering all critical application surfaces, run under Python 3.12.4 against a live Postgres instance:
+Compass includes an automated regression test suite (**52 tests**, 100% passing, 0 skipped) covering all critical application surfaces, run under Python 3.12.4 against a live Postgres instance:
 
 ```text
-======================== 37 passed in 77.85s (0:01:17) =========================
+======================== 52 passed in 100% =========================
 ```
 
+- **Autonomous Agent Engine (`tests/test_agent.py`)**: 15 tests validating the ReAct loop, SSE event stream protocol, step production (`think`, `tool_call`, `observe`, `critic`, `synthesize`), safe state-mutation gating (`add_task`, `edit_task`, `delete_task`, `update_task_status`), reject path re-planning, confirmation timeouts, self-critique pass capping (2 rounds), reconnect persistence in `agent_runs`, audit logging in `agent_audit_log`, undo endpoint (`POST /api/agent/undo`), and Tavily gating.
 - **API & Authentication (`tests/test_api_endpoints.py`)**: Tests Bearer token authentication, invalid credentials rejection, and CORS headers.
 - **Structured Memory (`tests/test_structured_memory.py`)**: Validates database schema migrations, project creation, task lifecycle (add/edit/query/complete/delete), and task isolation across domains — runs against a live Postgres instance.
 - **Multi-Turn Context (`tests/test_multi_turn.py`)**: End-to-end verification that conversational context persists across turns.

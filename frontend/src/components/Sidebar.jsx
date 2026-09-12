@@ -92,6 +92,7 @@ export default function Sidebar({
           📅 Timeline View
         </button>
         <button
+          id="sidebar-tab-chat"
           onClick={() => onSelectTab('chat')}
           style={{
             width: '100%',
@@ -104,9 +105,28 @@ export default function Sidebar({
             cursor: 'pointer',
             fontWeight: '500',
             fontSize: '12.5px',
+            marginBottom: '4px',
             transition: 'background 0.15s ease'
           }}>
           💬 Assistant Chat
+        </button>
+        <button
+          id="sidebar-tab-agent"
+          onClick={() => onSelectTab('agent')}
+          style={{
+            width: '100%',
+            textAlign: 'left',
+            padding: '8px 12px',
+            borderRadius: '6px',
+            border: 'none',
+            background: activeTab === 'agent' ? '#1e293b' : 'transparent',
+            color: activeTab === 'agent' ? '#fff' : '#94a3b8',
+            cursor: 'pointer',
+            fontWeight: '500',
+            fontSize: '12.5px',
+            transition: 'background 0.15s ease'
+          }}>
+          🧠 Agent Planner
         </button>
       </div>
 

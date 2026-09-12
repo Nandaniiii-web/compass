@@ -189,6 +189,82 @@ SEARCH_WEB_TOOL: Dict[str, Any] = {
     },
 }
 
+UPDATE_TASK_STATUS_TOOL: Dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "update_task_status",
+        "description": "Update the status of an existing task (open, in_progress, done).",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "task_id": {
+                    "type": "integer",
+                    "description": "The ID of the task to update",
+                },
+                "status": {
+                    "type": "string",
+                    "enum": ["open", "in_progress", "done"],
+                    "description": "The new status for the task",
+                },
+            },
+            "required": ["task_id", "status"],
+        },
+    },
+}
+
+EDIT_TASK_TOOL: Dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "edit_task",
+        "description": "Edit an existing task's title, due date, priority, or notes.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "task_id": {
+                    "type": "integer",
+                    "description": "The ID of the task to edit",
+                },
+                "title": {
+                    "type": "string",
+                    "description": "New title for the task",
+                },
+                "due_date": {
+                    "type": "string",
+                    "description": "New due date in YYYY-MM-DD format",
+                },
+                "priority": {
+                    "type": "string",
+                    "enum": ["low", "medium", "high", "urgent"],
+                    "description": "New priority level",
+                },
+                "notes": {
+                    "type": "string",
+                    "description": "Updated notes or context",
+                },
+            },
+            "required": ["task_id"],
+        },
+    },
+}
+
+DELETE_TASK_TOOL: Dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "delete_task",
+        "description": "Permanently delete a task by ID.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "task_id": {
+                    "type": "integer",
+                    "description": "The ID of the task to delete",
+                },
+            },
+            "required": ["task_id"],
+        },
+    },
+}
+
 # Registered tools exposed to the Nemotron router
 BASE_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
     ADD_TASK_TOOL,
@@ -198,6 +274,9 @@ BASE_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
     LOG_CODE_SNIPPET_TOOL,
     QUERY_CODE_CONTEXT_TOOL,
     SUMMARIZE_DAY_TOOL,
+    UPDATE_TASK_STATUS_TOOL,
+    EDIT_TASK_TOOL,
+    DELETE_TASK_TOOL,
 ]
 
 
@@ -449,6 +528,145 @@ async def handle_log_code_snippet(args: Dict[str, Any], pool: Any) -> Dict[str, 
             project_id = proj.get("id")
         chunk = await vector.store_chunk(conn, content=content, domain="code", project_id=project_id, tags=tag_list)
     return {"response": "💻 Logged code context with 768-dim embedding in Neon HNSW index.", "data": chunk}
+
+
+@register_skill("add_task")
+async def handle_add_task(args: Dict[str, Any], pool: Any) -> Dict[str, Any]:
+    """Add a new task via structured.create_task."""
+    from backend.memory import structured
+    from datetime import datetime
+
+    title = args.get("title", "Untitled Task")
+    domain = args.get("domain", "general")
+    if domain not in {"hackathon", "coursework", "code", "general"}:
+        domain = "general"
+
+    project_name = args.get("project")
+    due_str = args.get("due_date")
+    due_date = None
+    if due_str:
+        try:
+            due_date = datetime.strptime(str(due_str)[:10], "%Y-%m-%d").date()
+        except Exception:
+            pass
+
+    priority = args.get("priority", "medium")
+    if priority not in {"low", "medium", "high", "urgent"}:
+        priority = "medium"
+
+    status = args.get("status", "open")
+    if status not in {"open", "in_progress", "done", "overdue"}:
+        status = "open"
+
+    notes = args.get("notes")
+
+    try:
+        async with pool.acquire() as conn:
+            project_id = None
+            if project_name:
+                proj = await structured.get_or_create_project(conn, name=project_name, domain=domain)
+                project_id = proj.get("id")
+
+            task_record = await structured.create_task(
+                conn,
+                domain=domain,
+                title=title,
+                project_id=project_id,
+                due_date=due_date,
+                status=status,
+                priority=priority,
+                notes=notes,
+            )
+        return {
+            "response": f"Added task #{task_record.get('id')}: '{title}' in {domain}.",
+            "data": task_record,
+        }
+    except Exception as e:
+        logger.warning(f"Failed to add task: {e}")
+        return {"response": f"Failed to add task: {e}", "data": {"error": str(e)}}
+
+
+@register_skill("update_task_status")
+async def handle_update_task_status(args: Dict[str, Any], pool: Any) -> Dict[str, Any]:
+    """Update the status of an existing task."""
+    from backend.memory import structured
+    task_id = args.get("task_id")
+    status = args.get("status", "open")
+
+    if not task_id:
+        return {"response": "Missing task_id.", "data": {}}
+
+    try:
+        async with pool.acquire() as conn:
+            updated = await structured.update_task(conn, int(task_id), status=status)
+        if updated:
+            return {
+                "response": f"Updated task #{task_id} status to '{status}'.",
+                "data": updated,
+            }
+        return {"response": f"Task #{task_id} not found.", "data": {}}
+    except Exception as e:
+        return {"response": f"Failed to update task status: {e}", "data": {"error": str(e)}}
+
+
+@register_skill("edit_task")
+async def handle_edit_task(args: Dict[str, Any], pool: Any) -> Dict[str, Any]:
+    """Edit an existing task's title, due date, priority, or notes."""
+    from backend.memory import structured
+    task_id = args.get("task_id")
+
+    if not task_id:
+        return {"response": "Missing task_id.", "data": {}}
+
+    # Build kwargs from provided fields
+    update_fields: Dict[str, Any] = {}
+    if "title" in args:
+        update_fields["title"] = args["title"]
+    if "due_date" in args:
+        from datetime import datetime
+        try:
+            update_fields["due_date"] = datetime.strptime(args["due_date"], "%Y-%m-%d").date()
+        except (ValueError, TypeError):
+            return {"response": f"Invalid date format: {args['due_date']}. Use YYYY-MM-DD.", "data": {}}
+    if "priority" in args:
+        update_fields["priority"] = args["priority"]
+    if "notes" in args:
+        update_fields["notes"] = args["notes"]
+
+    if not update_fields:
+        return {"response": "No fields to update. Provide title, due_date, priority, or notes.", "data": {}}
+
+    try:
+        async with pool.acquire() as conn:
+            updated = await structured.update_task(conn, int(task_id), **update_fields)
+        if updated:
+            fields_str = ", ".join(f"{k}={v}" for k, v in update_fields.items())
+            return {
+                "response": f"Updated task #{task_id}: {fields_str}.",
+                "data": updated,
+            }
+        return {"response": f"Task #{task_id} not found.", "data": {}}
+    except Exception as e:
+        return {"response": f"Failed to edit task: {e}", "data": {"error": str(e)}}
+
+
+@register_skill("delete_task")
+async def handle_delete_task(args: Dict[str, Any], pool: Any) -> Dict[str, Any]:
+    """Delete a task by ID."""
+    from backend.memory import structured
+    task_id = args.get("task_id")
+
+    if not task_id:
+        return {"response": "Missing task_id.", "data": {}}
+
+    try:
+        async with pool.acquire() as conn:
+            deleted = await structured.delete_task(conn, int(task_id))
+        if deleted:
+            return {"response": f"Deleted task #{task_id}.", "data": {"deleted": True}}
+        return {"response": f"Task #{task_id} not found.", "data": {"deleted": False}}
+    except Exception as e:
+        return {"response": f"Failed to delete task: {e}", "data": {"error": str(e)}}
 
 
 async def dispatch_skill(skill_name: str, args: Dict[str, Any], pool: Any) -> Dict[str, Any]:
