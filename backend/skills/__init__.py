@@ -319,6 +319,42 @@ QUERY_COURSEWORK_NOTES_TOOL: Dict[str, Any] = {
     },
 }
 
+SUMMARIZE_ACROSS_DOMAINS_TOOL: Dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "summarize_across_domains",
+        "description": "Escalates to Nemotron-3 Ultra (550B) over pre-aggregated context for roadmap synthesis and cross-domain conflict analysis.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "date": {
+                    "type": "string",
+                    "description": "Date to summarize in YYYY-MM-DD format, defaults to today",
+                },
+            },
+            "required": [],
+        },
+    },
+}
+
+CHAT_TOOL: Dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "chat",
+        "description": "General conversational fallback for greetings, questions, and non-actionable queries.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "message": {
+                    "type": "string",
+                    "description": "The user message or conversation input",
+                },
+            },
+            "required": ["message"],
+        },
+    },
+}
+
 # Registered tools exposed to the Nemotron router
 BASE_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
     ADD_TASK_TOOL,
@@ -330,10 +366,12 @@ BASE_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
     LOG_CODE_CONTEXT_TOOL,
     QUERY_CODE_CONTEXT_TOOL,
     SUMMARIZE_DAY_TOOL,
+    SUMMARIZE_ACROSS_DOMAINS_TOOL,
     UPDATE_TASK_STATUS_TOOL,
     EDIT_TASK_TOOL,
     DELETE_TASK_TOOL,
     LIST_PROJECTS_TOOL,
+    CHAT_TOOL,
 ]
 
 
@@ -747,6 +785,19 @@ async def handle_list_projects(args: Dict[str, Any], pool: Any) -> Dict[str, Any
 async def handle_query_coursework_notes(args: Dict[str, Any], pool: Any) -> Dict[str, Any]:
     """Search coursework notes using vector memory search."""
     return await handle_query_code_context(args, pool)
+
+
+@register_skill("summarize_across_domains")
+async def handle_summarize_across_domains(args: Dict[str, Any], pool: Any) -> Dict[str, Any]:
+    """Escalates to Nemotron-3 Ultra (550B) over pre-aggregated context for roadmap synthesis."""
+    return await handle_summarize_day(args, pool)
+
+
+@register_skill("chat")
+async def handle_chat_skill(args: Dict[str, Any], pool: Any) -> Dict[str, Any]:
+    """Conversational fallback for greetings, questions, and non-actionable queries."""
+    msg = args.get("message") or args.get("query") or "Hello! I am Compass, your persistent multi-domain AI assistant."
+    return {"response": str(msg), "data": {"type": "chat"}}
 
 
 async def dispatch_skill(skill_name: str, args: Dict[str, Any], pool: Any) -> Dict[str, Any]:

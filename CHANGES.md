@@ -1,10 +1,14 @@
 # Compass Agent Subsystem — Complete Changes & Delivery Report
 
-**Repository:** `Nandaniiii-web/compass`  
-**Current Branch:** `main` (fast-forward merged from `feature/compass-agent`, commit `33e5f64`)  
+**Canonical Repository:** `Ratnesh-101/compass`  
+**Active Pull Request:** **[Ratnesh-101/compass PR #3](https://github.com/Ratnesh-101/compass/pull/3)** (`feat: Compass Agent Subsystem...`)  
+**Development Fork:** `Nandaniiii-web/compass` (branch: `feature/compass-agent`, fast-forward synced to `main`)  
 **Runtime Environment:** **Python 3.12.4** (`pytest 9.1.1`, `pluggy 1.6.0`)  
-**Database:** Neon Cloud Serverless PostgreSQL (`ep-restless-frog-a5icimeu-pooler.us-east-2.aws.neon.tech`)  
-**Test Suite Status:** **57 passed, 0 skipped, 0 failed** in 416.22s on `main`
+**Database Topology:**
+- **Production Instance (Render Backend):** Neon Serverless PostgreSQL Frankfurt (`ep-sweet-fire-b2y9w95z-pooler.eu-central-1.aws.neon.tech`) configured on `compass-backend-qryu.onrender.com`.
+- **Development & Verification Instance:** Neon Serverless PostgreSQL Ohio (`ep-restless-frog-a5icimeu-pooler.us-east-2.aws.neon.tech`), used for safe, isolated test execution, mutation gating, and audit rollbacks without mutating production data.
+- **Auto-Migration:** Schema additions (`agent_runs`, `agent_audit_log`) are self-applying on startup via `backend/memory/db.py:init_db`.  
+**Test Suite Status:** **57 passed, 0 skipped, 0 failed** in 416.22s
 
 ---
 
@@ -165,23 +169,34 @@ All 11 skills documented in `README.md` were audited, registered, and verified w
 4. **`edit_task`**: *(Added in build)* Edits title, due date, priority, or metadata.
 5. **`delete_task`**: *(Added in build)* Permanently deletes task by ID.
 6. **`list_projects`**: *(Fixed in Round 3)* Lists tracked projects across domains.
+   - **Root Cause:** The database query function `structured.list_projects` was implemented in `backend/memory/structured.py`, but it was omitted from `BASE_TOOL_DEFINITIONS` and lacked an `@register_skill("list_projects")` dispatch decorator. Any attempt by the Nemotron router or ReAct agent loop to call `list_projects` failed with `"Unknown skill 'list_projects'"`.
+   - **Fix:** Added `LIST_PROJECTS_TOOL` OpenAI JSON schema to `BASE_TOOL_DEFINITIONS` and implemented `@register_skill("list_projects")` in `backend/skills/__init__.py`.
 7. **`log_code_context`**: *(Fixed in Round 3)* Stores code notes and generates 768-dim embeddings.
+   - **Root Cause:** Naming mismatch between specification and code. The backend implemented and registered the tool as `log_code_snippet`, whereas the README documentation, CLI interface, and system prompt expected `log_code_context`. Calls using the canonical name failed.
+   - **Fix:** Added `LOG_CODE_CONTEXT_TOOL` to `BASE_TOOL_DEFINITIONS` and registered `@register_skill("log_code_context")` mapping to vector storage (`store_chunk`) with 768-dim Matryoshka embeddings in Neon HNSW.
 8. **`query_code_context`**: Performs cosine similarity search over code contexts.
 9. **`query_coursework_notes`**: *(Fixed in Round 3)* Retrieves academic notes via vector memory.
-10. **`chat`**: Conversational fallback in router.
+   - **Root Cause:** Semantic note retrieval was missing. The skill registry only included `query_coursework_tasks` (for querying structured SQL tasks by deadline), leaving semantic note search without a tool definition in `BASE_TOOL_DEFINITIONS` or a handler in `SKILL_REGISTRY`.
+   - **Fix:** Added `QUERY_COURSEWORK_NOTES_TOOL` to `BASE_TOOL_DEFINITIONS` and registered `@register_skill("query_coursework_notes")` to run vector cosine similarity queries over academic note chunks.
+10. **`chat`**: Conversational fallback for greetings and open inquiries.
+    - **Registration:** Added `CHAT_TOOL` to `BASE_TOOL_DEFINITIONS` and `@register_skill("chat")` returning conversational responses for greetings and general non-tool requests.
 11. **`summarize_across_domains`**: Escalated roadmap synthesis via Nemotron-3 Ultra.
+    - **Registration:** Added `SUMMARIZE_ACROSS_DOMAINS_TOOL` to `BASE_TOOL_DEFINITIONS` and `@register_skill("summarize_across_domains")` escalating directly to Nemotron-3 Ultra (550B) over pre-aggregated context for roadmap synthesis.
 
-### Live Dispatch Pass Result
+### Live Dispatch Pass Result (All 11 Skills Verified Live)
 ```text
-add_task                  -> [OK] Added task in hackathon.
-query_tasks               -> [OK] Found tasks in HACKATHON.
-list_projects             -> [OK] Found tracked projects.
+=== LIVE DISPATCH PASS FOR ALL 11 README SKILLS ===
+add_task                  -> [OK] Added task #80: 'Comprehensive 11-Skill Audit Task' in hackathon.
+query_tasks               -> [OK] Found 6 task(s) in HACKATHON: 'Audit Log Test 588269' (due: no due date, status: open).
+list_projects             -> [OK] Found 1 tracked project(s): 'Hackathon Submission' (hackathon).
 log_code_context          -> [OK] Logged code memory to CODE domain with 768-dim vector.
-query_code_context        -> [OK] Retrieved relevant memory chunks.
-query_coursework_notes    -> [OK] Retrieved relevant memory chunks.
-update_task_status        -> [OK] Updated task status.
-edit_task                 -> [OK] Updated task title.
-delete_task               -> [OK] Deleted task.
+query_code_context        -> [OK] Retrieved 3 relevant memory chunk(s) for query: 'Neon PostgreSQL skills'.
+query_coursework_notes    -> [OK] Retrieved 3 relevant memory chunk(s) for query: 'RISC-V hazard notes'.
+update_task_status        -> [OK] Updated task #80 status to 'in_progress'.
+edit_task                 -> [OK] Updated task #80: title=Comprehensive 11-Skill Audit Task (Updated).
+delete_task               -> [OK] Deleted task #80.
+chat                      -> [OK] Hey! What can you help me with?
+summarize_across_domains  -> [OK] Daily summary: 34 total open task(s) (GENERAL: 25, HACKATHON: 5, CODE: 3, COURSE...
 ```
 
 ---

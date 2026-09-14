@@ -175,7 +175,7 @@ async def test_agent_sse_event_format(client: AsyncClient):
 
 @pytest.mark.asyncio
 async def test_agent_skill_registry_has_new_skills(client: AsyncClient):
-    """Verify all README skills table tools are genuinely registered and dispatchable."""
+    """Verify all 11 README skills table tools are genuinely registered and dispatchable."""
     readme_skills = [
         "add_task",
         "query_tasks",
@@ -186,6 +186,8 @@ async def test_agent_skill_registry_has_new_skills(client: AsyncClient):
         "log_code_context",
         "query_code_context",
         "query_coursework_notes",
+        "chat",
+        "summarize_across_domains",
     ]
     tool_names = [t["function"]["name"] for t in TOOL_DEFINITIONS]
     for skill in readme_skills:
