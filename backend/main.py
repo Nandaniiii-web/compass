@@ -1150,3 +1150,42 @@ async def agent_capabilities():
             "routing": settings.ROUTER_MODEL,
         },
     }
+
+
+@app.get("/api/agent/proactive-briefing")
+async def get_latest_proactive_briefing():
+    """Retrieve the latest proactive nightly agent run."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT id, goal, status, accumulated_steps, messages, pending_actions, created_at, updated_at
+            FROM agent_runs
+            WHERE id LIKE 'proactive_nightly_%' OR goal ILIKE '%Nightly Proactive Consolidation%'
+            ORDER BY created_at DESC
+            LIMIT 1
+            """
+        )
+    if not row:
+        return {"found": False, "message": "No proactive nightly briefing found yet."}
+
+    import json
+    return {
+        "found": True,
+        "run_id": row["id"],
+        "goal": row["goal"],
+        "status": row["status"],
+        "accumulated_steps": json.loads(row["accumulated_steps"]) if isinstance(row["accumulated_steps"], str) else (row["accumulated_steps"] or []),
+        "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+        "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
+    }
+
+
+@app.post("/api/agent/trigger-nightly", dependencies=[Depends(verify_token)])
+async def trigger_nightly_consolidation_endpoint():
+    """Trigger the nightly consolidation job and autonomous proactive briefing run."""
+    from backend.jobs.consolidate import run_consolidation
+    pool = await get_pool()
+    result = await run_consolidation(dry_run=False, pool=pool)
+    return {"status": "ok", "consolidation": result}
+

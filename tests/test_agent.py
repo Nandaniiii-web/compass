@@ -704,3 +704,229 @@ async def test_demo_reject_scenario_execution(client: AsyncClient):
         assert run_row is not None
         await conn.execute("DELETE FROM agent_runs WHERE id = $1", demo_run_id)
 
+
+# ---------------------------------------------------------------------------
+# Flagship Agent Capabilities Tests
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_agent_per_step_cost_and_model_tier():
+    """Verify live step cost and model tier attribution on AgentStep and SSE."""
+    step = AgentStep(
+        type="think",
+        content="Analyzing tasks...",
+        step_number=1,
+        elapsed_ms=150,
+        run_id="test_run_cost",
+        model_tier="Nemotron-3 Super (120B)",
+        step_cost_usd=0.00042,
+    )
+    sse = step.to_sse()
+    assert "data: " in sse
+    payload = json.loads(sse[6:])
+    assert payload["model_tier"] == "Nemotron-3 Super (120B)"
+    assert payload["step_cost_usd"] == 0.00042
+
+    # Verify mock ReAct loop produces tier and cost
+    mock_client = MagicMock()
+    mock_client.chat = MagicMock()
+    mock_client.chat.completions = MagicMock()
+    mock_client.chat.completions.create = AsyncMock(side_effect=[
+        _create_mock_completion(content="Final synthesis completed."),
+    ])
+
+    steps = []
+    async for s in run_agent(
+        goal="Test step cost emission",
+        client=mock_client,
+        enable_critic=False,
+    ):
+        steps.append(s)
+
+    assert any(s.model_tier == "Nemotron-3 Super (120B)" for s in steps)
+    assert any(s.type == "done" and s.metadata and "report_card" in s.metadata for s in steps)
+
+    # Prove that compute_step_cost distinguishes input-rate pricing from output-rate pricing
+    from backend.services.usage import compute_step_cost
+
+    # 1. Holding total tokens constant at 100,000 tokens for Nemotron Ultra ($0.80/1M in, $2.40/1M out):
+    ultra_all_input = compute_step_cost("nemotron-ultra", prompt_tokens=100_000, completion_tokens=0)
+    ultra_all_output = compute_step_cost("nemotron-ultra", prompt_tokens=0, completion_tokens=100_000)
+    ultra_split = compute_step_cost("nemotron-ultra", prompt_tokens=50_000, completion_tokens=50_000)
+
+    # Under bugged behavior (completion=0.80), ultra_all_output was 0.08 == ultra_all_input
+    # With the fix (completion=2.40), output rate is 3x input rate:
+    assert ultra_all_input == 0.08, f"Expected 0.08, got {ultra_all_input}"
+    assert ultra_all_output == 0.24, f"Expected 0.24, got {ultra_all_output}"
+    assert ultra_all_output != ultra_all_input
+    assert ultra_all_output > ultra_split > ultra_all_input
+    assert round(ultra_all_output / ultra_all_input, 1) == 3.0
+
+    # 2. Exact documented token count verification: 11,755 in + 8,286 out => $0.02929 (not $0.016034)
+    ultra_scenario_cost = compute_step_cost("nemotron-ultra", prompt_tokens=11_755, completion_tokens=8_286)
+    expected_ultra_cost = round((11_755 * 0.80 + 8_286 * 2.40) / 1_000_000.0, 6)
+    assert ultra_scenario_cost == expected_ultra_cost == 0.02929
+    # Moving 8,286 tokens from output to input (holding total tokens at 20,041) changes the cost:
+    ultra_all_in_scenario = compute_step_cost("nemotron-ultra", prompt_tokens=20_041, completion_tokens=0)
+    assert ultra_scenario_cost != ultra_all_in_scenario
+    assert ultra_all_in_scenario == 0.016033
+
+
+@pytest.mark.asyncio
+async def test_agent_chains_three_distinct_tool_types():
+    """Verify agent chains 3 distinct tool types in a single triage goal."""
+    mock_client = MagicMock()
+    mock_client.chat = MagicMock()
+    mock_client.chat.completions = MagicMock()
+    mock_client.chat.completions.create = AsyncMock(side_effect=[
+        _create_mock_completion(tool_name="query_tasks", tool_args={"domain": "general"}),
+        _create_mock_completion(tool_name="query_code_context", tool_args={"project_name": "compass"}),
+        _create_mock_completion(tool_name="query_coursework_notes", tool_args={"course": "CS"}),
+        _create_mock_completion(content="Triage analysis: Deprioritize non-urgent refactoring."),
+    ])
+
+    pool = await get_pool()
+    tools_observed = []
+    async for s in run_agent(
+        goal="What should I deprioritize this week, given my code debt and upcoming exams?",
+        client=mock_client,
+        pool=pool,
+        enable_critic=False,
+        max_steps=6,
+    ):
+        if s.type == "tool_call":
+            tools_observed.append(s.tool_name)
+
+    assert "query_tasks" in tools_observed
+    assert "query_code_context" in tools_observed
+    assert "query_coursework_notes" in tools_observed
+    assert len(set(tools_observed)) >= 3
+
+
+@pytest.mark.asyncio
+async def test_agent_epistemic_abstention():
+    """Verify agent abstains when context is ambiguous or insufficient instead of hallucinating."""
+    mock_client = MagicMock()
+    mock_client.chat = MagicMock()
+    mock_client.chat.completions = MagicMock()
+    mock_client.chat.completions.create = AsyncMock(side_effect=[
+        _create_mock_completion(content="[ABSTAIN] Insufficient coursework information available. I cannot formulate a schedule without missing deadlines."),
+    ])
+
+    steps = []
+    async for s in run_agent(
+        goal="What is the final grade weighting and curve formula for Quantum Computing?",
+        client=mock_client,
+        enable_critic=False,
+    ):
+        steps.append(s)
+
+    synth_step = next(s for s in steps if s.type == "synthesize")
+    assert synth_step.metadata is not None
+    assert synth_step.metadata.get("abstained") is True
+
+    done_step = next(s for s in steps if s.type == "done")
+    assert done_step.metadata is not None
+    report_card = (done_step.metadata or {}).get("report_card", {})
+    assert report_card.get("abstained") is True
+
+
+@pytest.mark.asyncio
+async def test_agent_replan_diff_generated():
+    """Verify reject path generates and surfaces a structured re-plan diff."""
+    pool = await get_pool()
+    run_id = f"test_replan_{uuid.uuid4().hex[:6]}"
+
+    mock_client = MagicMock()
+    mock_client.chat = MagicMock()
+    mock_client.chat.completions = MagicMock()
+    mock_client.chat.completions.create = AsyncMock(side_effect=[
+        _create_mock_completion(content="Understood. Re-planning alternative without modifying requested task."),
+    ])
+
+    steps = []
+    async for s in run_agent(
+        goal="Reschedule conflicting deadlines",
+        client=mock_client,
+        pool=pool,
+        run_id=run_id,
+        action="reject",
+        feedback="Do not move OS Homework 2 deadline",
+        wait_for_confirmation=False,
+        enable_critic=False,
+    ):
+        steps.append(s)
+
+    obs_step = next(s for s in steps if s.type == "observe")
+    assert obs_step.metadata is not None
+    assert "replan_diff" in obs_step.metadata
+    diff = obs_step.metadata["replan_diff"]
+    assert "OS Homework 2" in diff["feedback"]
+
+    # Verify report card captures diff
+    done_step = next(s for s in steps if s.type == "done")
+    assert done_step.metadata is not None
+    report_card = (done_step.metadata or {}).get("report_card") or {}
+    assert report_card.get("replan_diff") is not None
+
+
+@pytest.mark.asyncio
+async def test_agent_report_card_emitted():
+    """Verify run report card contains comprehensive metrics and model tier breakdown."""
+    mock_client = MagicMock()
+    mock_client.chat = MagicMock()
+    mock_client.chat.completions = MagicMock()
+    mock_client.chat.completions.create = AsyncMock(side_effect=[
+        _create_mock_completion(content="Synthesis summary complete."),
+    ])
+
+    steps = []
+    async for s in run_agent(
+        goal="Test report card",
+        client=mock_client,
+        enable_critic=False,
+    ):
+        steps.append(s)
+
+    done_step = next(s for s in steps if s.type == "done")
+    assert done_step.metadata is not None
+    rc = (done_step.metadata or {}).get("report_card")
+    assert rc is not None
+    assert "total_steps" in rc
+    assert "elapsed_ms" in rc
+    assert "total_cost_usd" in rc
+    assert "tier_breakdown" in rc
+    assert "Nemotron-3 Super (120B)" in rc["tier_breakdown"]
+
+
+@pytest.mark.asyncio
+async def test_proactive_nightly_run_persisted_and_retrievable(client: AsyncClient):
+    """Verify autonomous nightly run executes and is retrievable via /api/agent/proactive-briefing."""
+    from backend.jobs.consolidate import trigger_proactive_nightly_run
+    pool = await get_pool()
+
+    mock_client = MagicMock()
+    mock_client.chat = MagicMock()
+    mock_client.chat.completions = MagicMock()
+    mock_client.chat.completions.create = AsyncMock(side_effect=[
+        _create_mock_completion(content="Nightly briefing complete: No major blockers found for tomorrow."),
+    ])
+
+    res = await trigger_proactive_nightly_run(pool=pool, client=mock_client)
+    assert res is not None
+    assert res["status"] == "completed"
+    run_id = res["run_id"]
+
+    try:
+        # Test GET /api/agent/proactive-briefing
+        resp = await client.get("/api/agent/proactive-briefing")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["found"] is True
+        assert "proactive_nightly_" in data["run_id"]
+        assert len(data["accumulated_steps"]) > 0
+    finally:
+        async with pool.acquire() as conn:
+            await conn.execute("DELETE FROM agent_runs WHERE id = $1", run_id)
+
+

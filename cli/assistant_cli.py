@@ -157,12 +157,12 @@ def _headers() -> dict:
 def _get(path: str, params: dict | None = None) -> dict:
     """Make an authenticated GET request to the backend."""
     try:
-        resp = httpx.get(f"{API_BASE}{path}", headers=_headers(), params=params, timeout=10)
+        resp = httpx.get(f"{API_BASE}{path}", headers=_headers(), params=params, timeout=30.0)
         resp.raise_for_status()
         return resp.json()
-    except httpx.ConnectError:
+    except (httpx.ConnectError, httpx.TimeoutException) as e:
         console.print("[compass.error]❌ Cannot connect to backend at "
-                      f"{API_BASE}. Is the server running?[/]")
+                      f"{API_BASE} (error: {e}). Is the server running?[/]")
         raise typer.Exit(1)
     except httpx.HTTPStatusError as e:
         console.print(f"[compass.error]❌ API error {e.response.status_code}: "

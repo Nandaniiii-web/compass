@@ -19,6 +19,7 @@ import argparse
 import asyncio
 from datetime import datetime, date, timedelta, timezone
 from pathlib import Path
+from typing import Optional, Any, Dict, List, Tuple
 
 # Add project root to path
 _project_root = Path(__file__).resolve().parent.parent.parent
@@ -272,13 +273,87 @@ async def archive_stale_threads(
 
 
 # ---------------------------------------------------------------------------
+# Task 4: Autonomous Initiation (Proactive Nightly Briefing)
+# ---------------------------------------------------------------------------
+
+PROACTIVE_NIGHTLY_GOAL = (
+    "Nightly Proactive Consolidation: Audit cross-domain deadlines, check for deadline conflicts "
+    "between hackathon and coursework, and synthesize tomorrow's executive briefing."
+)
+
+
+async def trigger_proactive_nightly_run(
+    conn: Optional[asyncpg.Connection] = None,
+    client: Any = None,
+    dry_run: bool = False,
+    pool: Any = None,
+) -> Optional[dict]:
+    """
+    Task 4: Autonomous Initiation.
+    Trigger a proactive agent run that audits cross-domain deadlines,
+    flags upcoming conflicts, and persists the completed run into agent_runs
+    so the user sees a ready-to-read executive briefing upon opening Compass.
+    """
+    if dry_run:
+        logger.info("  [4/4] Proactive Nightly Briefing: [DRY-RUN] Would execute autonomous agent run.")
+        return {"status": "dry_run", "goal": PROACTIVE_NIGHTLY_GOAL}
+
+    from backend.agent import run_agent
+
+    run_id = f"proactive_nightly_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+    logger.info(f"  [4/4] Triggering Proactive Nightly Briefing (Run ID: {run_id})...")
+
+    created_pool = False
+    if pool is None:
+        try:
+            pool = await asyncpg.create_pool(settings.DATABASE_URL, min_size=1, max_size=2)
+            created_pool = True
+        except Exception as e:
+            logger.warning(f"Failed to create pool for proactive run: {e}")
+            return None
+
+    try:
+        if client is None and settings.NEBIUS_API_KEY:
+            from openai import AsyncOpenAI
+            client = AsyncOpenAI(api_key=settings.NEBIUS_API_KEY, base_url=settings.NEBIUS_BASE_URL, timeout=30.0)
+
+        steps = []
+        async for step in run_agent(
+            goal=PROACTIVE_NIGHTLY_GOAL,
+            client=client,
+            settings=settings,
+            pool=pool,
+            run_id=run_id,
+            max_steps=6,
+            wait_for_confirmation=False,
+            enable_critic=False,
+        ):
+            steps.append(step)
+
+        logger.info(f"  [4/4] ✅ Completed Proactive Nightly Briefing ({len(steps)} steps). Persisted as {run_id}.")
+        return {
+            "run_id": run_id,
+            "status": "completed",
+            "steps_count": len(steps),
+            "goal": PROACTIVE_NIGHTLY_GOAL,
+        }
+    except Exception as e:
+        logger.error(f"Proactive nightly run failed: {e}")
+        return {"run_id": run_id, "status": "failed", "error": str(e)}
+    finally:
+        if created_pool and pool:
+            await pool.close()
+
+
+# ---------------------------------------------------------------------------
 # Main Orchestrator
 # ---------------------------------------------------------------------------
 
 async def run_consolidation(
     similarity_threshold: float = 0.95,
     stale_thread_days: int = 7,
-    dry_run: bool = False
+    dry_run: bool = False,
+    pool: Any = None,
 ) -> dict:
     logger.info("=" * 60)
     logger.info("🧭 Compass — Starting Nightly Memory Consolidation Job")
@@ -303,18 +378,22 @@ async def run_consolidation(
         overdue_count = await flag_overdue_tasks(conn, dry_run=dry_run)
         pruned_count = await deduplicate_vectors(conn, threshold=similarity_threshold, dry_run=dry_run)
         archived_count = await archive_stale_threads(conn, client, stale_days=stale_thread_days, dry_run=dry_run)
+        proactive_res = await trigger_proactive_nightly_run(conn, client, dry_run=dry_run, pool=pool)
 
         logger.info("=" * 60)
         logger.info("SUMMARY OF CONSOLIDATION:")
         logger.info(f"  • Overdue tasks flagged  : {overdue_count}")
         logger.info(f"  • Duplicate chunks pruned: {pruned_count}")
         logger.info(f"  • Stale threads archived : {archived_count}")
+        if proactive_res:
+            logger.info(f"  • Proactive agent run    : {proactive_res.get('status')} ({proactive_res.get('run_id')})")
         logger.info("=" * 60)
 
         return {
             "overdue_tasks_flagged": overdue_count,
             "duplicate_chunks_merged": pruned_count,
             "stale_conversations_rolled_up": archived_count,
+            "proactive_nightly_run": proactive_res,
             # Backwards compatibility aliases
             "overdue_tasks": overdue_count,
             "pruned_chunks": pruned_count,

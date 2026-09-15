@@ -74,9 +74,120 @@ const SUGGESTED_GOALS = [
   "Summarize my open tasks and suggest what to tackle first",
 ]
 
+function ReplanDiffCard({ diff }) {
+  if (!diff) return null
+  return (
+    <div style={{
+      margin: '10px 0 8px',
+      background: 'rgba(15, 23, 42, 0.75)',
+      border: '1px solid #334155',
+      borderRadius: '6px',
+      padding: '10px 12px',
+      fontSize: '12px',
+      fontFamily: 'JetBrains Mono, monospace',
+    }}>
+      <div style={{ color: '#94a3b8', fontWeight: '700', marginBottom: '6px', fontSize: '11px', letterSpacing: '0.05em' }}>
+        🔄 RE-PLAN DIFF (HUMAN IN THE LOOP)
+      </div>
+      <div style={{ color: '#f87171', textDecoration: 'line-through', marginBottom: '4px' }}>
+        - DECLINED: {diff.declined_action?.tool}({JSON.stringify(diff.declined_action?.args || {})})
+      </div>
+      <div style={{ color: '#fbbf24', marginBottom: '4px' }}>
+        ~ FEEDBACK: "{diff.feedback}"
+      </div>
+      <div style={{ color: '#4ade80' }}>
+        + RE-PLANNING: Finding non-conflicting alternative without state alteration
+      </div>
+    </div>
+  )
+}
+
+function ReportCard({ reportCard }) {
+  if (!reportCard) return null
+  return (
+    <div id="agent-report-card" style={{
+      marginTop: '12px',
+      background: 'linear-gradient(135deg, rgba(15, 23, 42, 0.95), rgba(30, 41, 59, 0.95))',
+      border: '1px solid #3b82f6',
+      borderRadius: '10px',
+      padding: '14px 16px',
+      boxShadow: '0 4px 20px rgba(0,0,0,0.4)',
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <span style={{ fontSize: '18px' }}>📊</span>
+          <span style={{ fontWeight: '700', fontSize: '13px', color: '#60a5fa', letterSpacing: '0.05em' }}>
+            AGENT RUN REPORT CARD
+          </span>
+        </div>
+        <span style={{
+          fontSize: '10px',
+          fontWeight: '700',
+          padding: '2px 8px',
+          borderRadius: '12px',
+          background: reportCard.abstained ? 'rgba(245, 158, 11, 0.2)' : 'rgba(34, 197, 94, 0.2)',
+          color: reportCard.abstained ? '#fbbf24' : '#4ade80',
+          border: `1px solid ${reportCard.abstained ? '#f59e0b44' : '#22c55e44'}`,
+        }}>
+          {reportCard.abstained ? 'EPISTEMIC ABSTENTION' : 'COMPLETED'}
+        </span>
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '8px', marginBottom: '12px' }}>
+        <div style={{ background: '#0f172a', padding: '8px 10px', borderRadius: '6px', border: '1px solid #1e293b' }}>
+          <div style={{ fontSize: '10px', color: '#64748b' }}>TOTAL TIME</div>
+          <div style={{ fontSize: '13px', fontWeight: '700', color: '#e2e8f0', fontFamily: 'JetBrains Mono, monospace' }}>
+            {reportCard.elapsed_ms}ms
+          </div>
+        </div>
+        <div style={{ background: '#0f172a', padding: '8px 10px', borderRadius: '6px', border: '1px solid #1e293b' }}>
+          <div style={{ fontSize: '10px', color: '#64748b' }}>STEPS</div>
+          <div style={{ fontSize: '13px', fontWeight: '700', color: '#e2e8f0', fontFamily: 'JetBrains Mono, monospace' }}>
+            {reportCard.total_steps}
+          </div>
+        </div>
+        <div style={{ background: '#0f172a', padding: '8px 10px', borderRadius: '6px', border: '1px solid #1e293b' }}>
+          <div style={{ fontSize: '10px', color: '#64748b' }}>CRITIQUE</div>
+          <div style={{ fontSize: '13px', fontWeight: '700', color: '#c084fc', fontFamily: 'JetBrains Mono, monospace' }}>
+            {reportCard.critique_rounds || 0} round(s)
+          </div>
+        </div>
+        <div style={{ background: '#0f172a', padding: '8px 10px', borderRadius: '6px', border: '1px solid #1e293b' }}>
+          <div style={{ fontSize: '10px', color: '#64748b' }}>TOTAL COST</div>
+          <div style={{ fontSize: '13px', fontWeight: '700', color: '#10b981', fontFamily: 'JetBrains Mono, monospace' }}>
+            ${(reportCard.total_cost_usd || 0).toFixed(5)}
+          </div>
+        </div>
+      </div>
+
+      {reportCard.tier_breakdown && (
+        <div style={{ fontSize: '11px', color: '#94a3b8', background: '#0f172a', padding: '8px 10px', borderRadius: '6px', border: '1px solid #1e293b' }}>
+          <div style={{ fontWeight: '600', marginBottom: '4px', color: '#cbd5e1' }}>Model Tier Attribution:</div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '12px', fontFamily: 'JetBrains Mono, monospace', fontSize: '10px' }}>
+            {Object.entries(reportCard.tier_breakdown).map(([tier, cost]) => (
+              <span key={tier} style={{ color: cost > 0 ? '#60a5fa' : '#64748b' }}>
+                • {tier}: <strong style={{ color: cost > 0 ? '#34d399' : '#94a3b8' }}>${cost.toFixed(5)}</strong>
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 function StepCard({ step, index }) {
   const style = STEP_STYLES[step.type] || STEP_STYLES.think
   const isGradient = step.type === 'synthesize'
+  const isAbstained = step.metadata?.abstained || (typeof step.content === 'string' && step.content.includes('[ABSTAIN]'))
+  const replanDiff = step.metadata?.replan_diff
+  let reportCard = step.metadata?.report_card
+  if (!reportCard && step.type === 'done') {
+    try {
+      const parsed = JSON.parse(step.content)
+      reportCard = parsed.report_card
+    } catch {}
+  }
 
   return (
     <div
@@ -90,7 +201,7 @@ function StepCard({ step, index }) {
         animation: 'slideIn 0.3s ease-out',
       }}
     >
-      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px', flexWrap: 'wrap' }}>
         <span style={{ fontSize: '14px' }}>{style.icon}</span>
         <span style={{
           fontSize: '10px',
@@ -102,6 +213,38 @@ function StepCard({ step, index }) {
         }}>
           {style.label}
         </span>
+
+        {/* Model Tier Attribution */}
+        {step.model_tier && (
+          <span style={{
+            fontSize: '10px',
+            color: '#94a3b8',
+            background: 'rgba(30, 41, 59, 0.8)',
+            padding: '2px 8px',
+            borderRadius: '10px',
+            border: '1px solid #334155',
+            fontFamily: 'JetBrains Mono, monospace',
+          }}>
+            {step.model_tier}
+          </span>
+        )}
+
+        {/* Live USD Cost Badge */}
+        {step.step_cost_usd !== undefined && step.step_cost_usd !== null && (
+          <span style={{
+            fontSize: '10px',
+            fontWeight: '600',
+            color: step.step_cost_usd > 0 ? '#34d399' : '#64748b',
+            background: step.step_cost_usd > 0 ? 'rgba(16, 185, 129, 0.12)' : 'rgba(51, 65, 85, 0.3)',
+            padding: '2px 6px',
+            borderRadius: '10px',
+            border: `1px solid ${step.step_cost_usd > 0 ? '#10b98144' : '#47556933'}`,
+            fontFamily: 'JetBrains Mono, monospace',
+          }}>
+            ${step.step_cost_usd.toFixed(5)}
+          </span>
+        )}
+
         <span style={{
           fontSize: '10px',
           color: '#64748b',
@@ -123,6 +266,28 @@ function StepCard({ step, index }) {
         </div>
       )}
 
+      {/* Epistemic Abstention Warning Card */}
+      {isAbstained && (
+        <div style={{
+          background: 'rgba(245, 158, 11, 0.15)',
+          border: '1px solid #f59e0b',
+          borderRadius: '6px',
+          padding: '8px 12px',
+          marginBottom: '8px',
+          color: '#fbbf24',
+          fontSize: '12px',
+          fontWeight: '600',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '6px',
+        }}>
+          🛡️ EPISTEMIC ABSTENTION: Agent identified insufficient context or missing data and gracefully refused to speculate.
+        </div>
+      )}
+
+      {/* Re-Plan Diff Block */}
+      {replanDiff && <ReplanDiffCard diff={replanDiff} />}
+
       <div style={{
         fontSize: '13px',
         color: '#e2e8f0',
@@ -132,6 +297,9 @@ function StepCard({ step, index }) {
       }}>
         {step.type === 'done' ? formatDoneSummary(step.content) : step.content}
       </div>
+
+      {/* Compact Run Report Card */}
+      {step.type === 'done' && reportCard && <ReportCard reportCard={reportCard} />}
     </div>
   )
 }
@@ -156,6 +324,8 @@ export default function AgentPanel() {
   const [showRejectInput, setShowRejectInput] = useState(false)
   const [activityList, setActivityList] = useState([])
   const [critiqueStats, setCritiqueStats] = useState(null)
+  const [proactiveBriefing, setProactiveBriefing] = useState(null)
+  const [triggeringNightly, setTriggeringNightly] = useState(false)
   const traceEndRef = useRef(null)
   const abortRef = useRef(null)
 
@@ -189,9 +359,53 @@ export default function AgentPanel() {
     }
   }
 
+  const fetchProactiveBriefing = async () => {
+    try {
+      const res = await fetch(`${getApiBase()}/api/agent/proactive-briefing`)
+      if (res.ok) {
+        const data = await res.json()
+        if (data.found) {
+          setProactiveBriefing(data)
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  const triggerNightlyJob = async () => {
+    setTriggeringNightly(true)
+    try {
+      const res = await fetch(`${getApiBase()}/api/agent/trigger-nightly`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer dev-token',
+        },
+      })
+      if (res.ok) {
+        await fetchProactiveBriefing()
+        await fetchActivity()
+      }
+    } catch {
+      // ignore
+    } finally {
+      setTriggeringNightly(false)
+    }
+  }
+
+  const loadProactiveBriefingTrace = () => {
+    if (proactiveBriefing && proactiveBriefing.accumulated_steps) {
+      setSteps(proactiveBriefing.accumulated_steps)
+      setCurrentRunId(proactiveBriefing.run_id)
+      setGoal(proactiveBriefing.goal || '')
+    }
+  }
+
   useEffect(() => {
     fetchActivity()
     fetchCritiqueStats()
+    fetchProactiveBriefing()
   }, [])
 
   // Auto-scroll to bottom as new steps appear
@@ -398,6 +612,71 @@ export default function AgentPanel() {
         borderBottom: '1px solid #1e293b',
         flexShrink: 0,
       }}>
+        {/* Proactive Autonomous Overnight Briefing Banner */}
+        {proactiveBriefing && (
+          <div style={{
+            background: 'linear-gradient(135deg, rgba(30, 41, 59, 0.8), rgba(15, 23, 42, 0.95))',
+            border: '1px solid #38bdf855',
+            borderRadius: '8px',
+            padding: '10px 14px',
+            marginBottom: '12px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: '12px',
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+              <span style={{ fontSize: '20px' }}>🌙</span>
+              <div>
+                <div style={{ fontSize: '12px', fontWeight: '700', color: '#38bdf8', letterSpacing: '0.03em' }}>
+                  Autonomous Overnight Briefing Ready
+                </div>
+                <div style={{ fontSize: '11px', color: '#94a3b8' }}>
+                  Generated by Nightly Consolidation Worker ({proactiveBriefing.accumulated_steps?.length || 0} reasoning steps · {proactiveBriefing.run_id})
+                </div>
+              </div>
+            </div>
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <button
+                id="load-proactive-briefing-btn"
+                onClick={loadProactiveBriefingTrace}
+                style={{
+                  padding: '5px 12px',
+                  background: '#0284c7',
+                  border: 'none',
+                  borderRadius: '6px',
+                  color: '#fff',
+                  fontSize: '11px',
+                  fontWeight: '600',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '4px',
+                }}
+              >
+                📥 View Overnight Trace
+              </button>
+              <button
+                id="trigger-nightly-btn"
+                onClick={triggerNightlyJob}
+                disabled={triggeringNightly}
+                style={{
+                  padding: '5px 10px',
+                  background: '#1e293b',
+                  border: '1px solid #334155',
+                  borderRadius: '6px',
+                  color: '#94a3b8',
+                  fontSize: '11px',
+                  cursor: 'pointer',
+                }}
+                title="Trigger nightly consolidation job on-demand"
+              >
+                {triggeringNightly ? '⏳ Running...' : '↻ Run Job Now'}
+              </button>
+            </div>
+          </div>
+        )}
+
         <div style={{
           display: 'flex',
           gap: '8px',
@@ -492,6 +771,59 @@ export default function AgentPanel() {
             >
               ⚡ Demo: Reject-Path Scenario
             </button>
+
+            <button
+              id="agent-demo-tri-domain-btn"
+              onClick={() => {
+                const demoGoal = "What should I deprioritize this week, given my code debt and upcoming exams?"
+                setGoal(demoGoal)
+                runAgent(demoGoal)
+              }}
+              style={{
+                padding: '5px 12px',
+                background: 'linear-gradient(135deg, rgba(37, 99, 235, 0.25), rgba(147, 51, 234, 0.25))',
+                border: '1px solid #3b82f688',
+                borderRadius: '14px',
+                color: '#60a5fa',
+                fontSize: '11px',
+                fontWeight: '700',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '4px',
+                transition: 'all 0.2s',
+              }}
+              title="Chains query_tasks, query_code_context, and query_coursework_notes in a single run"
+            >
+              ⚡ 3-Domain Triage
+            </button>
+
+            <button
+              id="agent-demo-abstain-btn"
+              onClick={() => {
+                const demoGoal = "What is the final grade weighting and curve formula for the Quantum Computing midterm?"
+                setGoal(demoGoal)
+                runAgent(demoGoal)
+              }}
+              style={{
+                padding: '5px 12px',
+                background: 'linear-gradient(135deg, rgba(245, 158, 11, 0.25), rgba(217, 119, 6, 0.25))',
+                border: '1px solid #f59e0b88',
+                borderRadius: '14px',
+                color: '#fbbf24',
+                fontSize: '11px',
+                fontWeight: '700',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '4px',
+                transition: 'all 0.2s',
+              }}
+              title="Demonstrates epistemic abstention when required context is missing"
+            >
+              🛡️ Epistemic Abstention
+            </button>
+
             {SUGGESTED_GOALS.map((sg, i) => (
               <button
                 key={i}

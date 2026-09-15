@@ -20,13 +20,13 @@ PRICING_PER_1M = {
     # Normalized model keys
     "nemotron-nano": {"prompt": 0.06, "completion": 0.24},
     "nemotron-super": {"prompt": 0.30, "completion": 0.90},
-    "nemotron-ultra": {"prompt": 0.80, "completion": 0.80},
+    "nemotron-ultra": {"prompt": 0.80, "completion": 2.40},
     "qwen3-embedding": {"prompt": 0.02, "completion": 0.00},
     
     # Full Model ID mappings for OpenAI SDK compatibility
     "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B": {"prompt": 0.06, "completion": 0.24},
     "nvidia/nemotron-3-super-120b-a12b": {"prompt": 0.30, "completion": 0.90},
-    "nvidia/Nemotron-3-Ultra-550b-a55b": {"prompt": 0.80, "completion": 0.80},
+    "nvidia/Nemotron-3-Ultra-550b-a55b": {"prompt": 0.80, "completion": 2.40},
     "Qwen/Qwen3-Embedding-8B": {"prompt": 0.02, "completion": 0.00},
 }
 
@@ -42,6 +42,14 @@ def _normalize_model_name(name: str) -> str:
     if "embedding" in n or "qwen" in n:
         return "qwen3-embedding"
     return name
+
+
+def compute_step_cost(model_name: str, prompt_tokens: int, completion_tokens: int) -> float:
+    """Compute estimated USD cost for a single model call based on token counts."""
+    norm_key = _normalize_model_name(model_name)
+    pricing = PRICING_PER_1M.get(norm_key, {"prompt": 0.30, "completion": 0.90})
+    cost = (prompt_tokens * pricing["prompt"] / 1_000_000.0) + (completion_tokens * pricing["completion"] / 1_000_000.0)
+    return round(cost, 6)
 
 
 # In-Memory State Store — initialized with baseline multi-turn activity across skills
