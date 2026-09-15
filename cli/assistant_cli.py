@@ -612,6 +612,7 @@ def agent(
     max_steps: int = typer.Option(8, "--max-steps", "-m", help="Max reasoning steps"),
     no_critic: bool = typer.Option(False, "--no-critic", help="Disable self-critique pass"),
     demo_reject: bool = typer.Option(False, "--demo-reject", help="Run in pre-loaded reject-path demo mode"),
+    conversation_id: Optional[str] = typer.Option(None, "--conversation-id", "-c", help="Link run to an existing conversation"),
 ):
     """🧠 Run the autonomous agent to plan, analyze, and act on your tasks.
 
@@ -657,6 +658,7 @@ def agent(
                 "max_steps": max_steps,
                 "enable_critic": not no_critic,
                 "confirmed_actions": [],
+                "conversation_id": conversation_id,
             },
             timeout=120.0,
         ) as response:
@@ -911,6 +913,84 @@ def agent_stats():
 
     except Exception as e:
         console.print(f"[compass.error]❌ Failed to fetch critique stats: {e}[/]")
+
+
+@app.command("agent-runs")
+def agent_runs(
+    limit: int = typer.Option(15, "--limit", "-n", help="Number of runs to show"),
+    conversation_id: Optional[str] = typer.Option(None, "--conversation-id", "-c", help="Filter runs by conversation ID"),
+):
+    """📜 List recent agent execution runs with statuses and step counts."""
+    try:
+        url = f"{API_BASE}/api/agent/runs?limit={limit}"
+        if conversation_id:
+            url += f"&conversation_id={conversation_id}"
+        resp = httpx.get(url, timeout=15.0)
+        resp.raise_for_status()
+        runs = resp.json().get("runs", [])
+
+        if not runs:
+            console.print("[dim]No agent runs found.[/]")
+            return
+
+        table = Table(
+            title="📜 Compass Agent Runs History",
+            box=box.ROUNDED,
+            header_style="bold cyan",
+        )
+        table.add_column("Run ID", style="dim cyan")
+        table.add_column("Goal", style="white")
+        table.add_column("Status", style="bold")
+        table.add_column("Steps", justify="right", style="magenta")
+        table.add_column("Created", style="dim")
+        table.add_column("Conv ID", style="dim yellow")
+
+        for r in runs:
+            rid = (r.get("id") or "")[:18]
+            goal = (r.get("goal") or "")[:40]
+            if len(r.get("goal") or "") > 40:
+                goal += "..."
+            status = r.get("status", "unknown")
+            st_style = "[green]COMPLETED[/]" if status == "completed" else f"[yellow]{status.upper()}[/]"
+            steps = str(r.get("steps_count", 0))
+            created = (r.get("created_at") or "")[:19].replace("T", " ")
+            cid = (r.get("conversation_id") or "—")[:8]
+            table.add_row(rid, goal, st_style, steps, created, cid)
+
+        console.print(table)
+    except Exception as e:
+        console.print(f"[compass.error]❌ Failed to fetch agent runs: {e}[/]")
+
+
+@app.command("agent-briefing")
+def agent_briefing():
+    """🌅 Inspect the latest autonomous overnight proactive briefing."""
+    try:
+        resp = httpx.get(f"{API_BASE}/api/agent/proactive-briefing", timeout=15.0)
+        resp.raise_for_status()
+        data = resp.json()
+
+        if not data.get("briefing"):
+            console.print("[dim]No proactive briefing available yet. Trigger one with: curl -X POST http://localhost:8000/api/agent/trigger-nightly[/]")
+            return
+
+        run_id = data.get("run_id", "Unknown")
+        created = data.get("created_at", "")[:19].replace("T", " ")
+        briefing_text = data.get("briefing", "")
+        steps_count = data.get("steps_count", 0)
+
+        content = (
+            f"[bold cyan]Run ID:[/] {run_id}  |  [bold]Generated:[/] {created}  |  [bold]Steps:[/] {steps_count}\n\n"
+            f"{briefing_text}"
+        )
+        console.print(Panel(
+            content,
+            title="🌅 Autonomous Morning Executive Briefing",
+            border_style="magenta",
+            padding=(1, 2),
+        ))
+    except Exception as e:
+        console.print(f"[compass.error]❌ Failed to fetch proactive briefing: {e}[/]")
 
 
 # ---------------------------------------------------------------------------

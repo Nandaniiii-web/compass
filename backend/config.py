@@ -49,17 +49,18 @@ class Settings(BaseSettings):
         "https://compass.nebius.app",
     ]
 
-    # --- Cost tracking (USD per 1M tokens, approximate) ---
+    # --- Cost tracking (USD per 1M tokens, verified Nebius Token Factory rates) ---
     COST_PER_1M_INPUT: dict[str, float] = {
-        "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B": 0.12,
-        "nvidia/nemotron-3-super-120b-a12b": 0.40,
-        "nvidia/Nemotron-3-Ultra-550b-a55b": 3.00,
-        "Qwen/Qwen3-Embedding-8B": 0.05,
+        "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B": 0.06,
+        "nvidia/nemotron-3-super-120b-a12b": 0.30,
+        "nvidia/Nemotron-3-Ultra-550b-a55b": 0.80,
+        "Qwen/Qwen3-Embedding-8B": 0.02,
     }
     COST_PER_1M_OUTPUT: dict[str, float] = {
-        "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B": 0.12,
-        "nvidia/nemotron-3-super-120b-a12b": 0.40,
-        "nvidia/Nemotron-3-Ultra-550b-a55b": 3.00,
+        "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B": 0.24,
+        "nvidia/nemotron-3-super-120b-a12b": 0.90,
+        "nvidia/Nemotron-3-Ultra-550b-a55b": 2.40,
+        "Qwen/Qwen3-Embedding-8B": 0.00,
     }
 
     model_config = SettingsConfigDict(

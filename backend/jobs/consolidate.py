@@ -277,8 +277,8 @@ async def archive_stale_threads(
 # ---------------------------------------------------------------------------
 
 PROACTIVE_NIGHTLY_GOAL = (
-    "Nightly Proactive Consolidation: Audit cross-domain deadlines, check for deadline conflicts "
-    "between hackathon and coursework, and synthesize tomorrow's executive briefing."
+    "Nightly Proactive Consolidation: Audit cross-domain deadlines using detect_deadline_conflicts, "
+    "check for deadline conflicts between hackathon and coursework, and synthesize tomorrow's executive briefing."
 )
 
 

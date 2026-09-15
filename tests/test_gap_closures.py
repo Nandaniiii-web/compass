@@ -156,3 +156,251 @@ async def test_usage_summary_cost_delta_changes_across_turns(client: AsyncClient
     cost_delta = cost_after_turn2 - cost_after_turn1
     assert cost_delta > 0.001, f"Expected noticeable cost delta on heavy synthesis turn, got {cost_delta}"
     assert cost_after_turn2 > cost_after_turn1 > cost_initial
+
+
+@pytest.mark.asyncio
+async def test_query_coursework_notes_sets_coursework_domain(monkeypatch):
+    """Gap 3 Fix: Verify query_coursework_notes specifically queries domain='coursework'."""
+    from backend.skills import dispatch_skill
+    from backend.memory.db import get_pool
+    from unittest.mock import AsyncMock
+
+    pool = await get_pool()
+    captured_args = {}
+
+    async def mock_search_chunks(conn, query, domain=None, limit=5):
+        captured_args["query"] = query
+        captured_args["domain"] = domain
+        return []
+
+    monkeypatch.setattr("backend.memory.vector.search_chunks", mock_search_chunks)
+
+    result = await dispatch_skill("query_coursework_notes", {"course": "CS 61C", "notes": "RISC-V"}, pool)
+    assert captured_args.get("domain") == "coursework"
+    assert captured_args.get("query") in ("CS 61C", "RISC-V")
+    assert "response" in result
+
+
+@pytest.mark.asyncio
+async def test_summarize_across_domains_aggregates_multidomain_data():
+    """Gap 4 Fix: Verify summarize_across_domains pre-aggregates tasks, code chunks, and coursework."""
+    from backend.skills import dispatch_skill
+    from backend.memory.db import get_pool
+
+    pool = await get_pool()
+    result = await dispatch_skill("summarize_across_domains", {}, pool)
+    assert "response" in result
+    assert "data" in result
+    data = result["data"]
+    assert "open_tasks_by_domain" in data
+    assert "code_chunks_count" in data
+    assert "coursework_chunks_count" in data
+    assert "projects_count" in data
+
+
+@pytest.mark.asyncio
+async def test_agent_confirm_and_undo_public_access(client: AsyncClient):
+    """Gap 5 & 7 Fix: Verify /api/agent/confirm and /api/agent/undo can be accessed without auth headers."""
+    # Confirm endpoint without token should not return 401 Unauthorized
+    resp_confirm = await client.post(
+        "/api/agent/confirm",
+        json={"actions": [], "run_id": "test_public_confirm"},
+    )
+    assert resp_confirm.status_code == 200
+
+    # Undo endpoint without token should not return 401 Unauthorized
+    resp_undo = await client.post(
+        "/api/agent/undo",
+        json={"run_id": "nonexistent_run_id"},
+    )
+    assert resp_undo.status_code == 200
+    assert resp_undo.json().get("status") in ("ok", "noop", "error")
+
+
+def test_config_pricing_matches_usage_pricing():
+    """Gap 5 Fix: Verify config.py pricing matches usage.py pricing catalog."""
+    from backend.config import get_settings
+    from backend.services.usage import PRICING_PER_1M
+
+    settings = get_settings()
+    for model_id, in_cost in settings.COST_PER_1M_INPUT.items():
+        if model_id in PRICING_PER_1M:
+            assert PRICING_PER_1M[model_id]["prompt"] == in_cost
+    for model_id, out_cost in settings.COST_PER_1M_OUTPUT.items():
+        if model_id in PRICING_PER_1M:
+            assert PRICING_PER_1M[model_id]["completion"] == out_cost
+
+
+@pytest.mark.asyncio
+async def test_detect_deadline_conflicts_skill():
+    """Enhancement 8: Verify detect_deadline_conflicts skill scans tasks and returns structured conflicts."""
+    from backend.skills import dispatch_skill
+    from backend.memory.db import get_pool
+    from backend.memory import structured
+    from datetime import date, timedelta
+    import uuid
+
+    pool = await get_pool()
+    tomorrow_date = date.today() + timedelta(days=1)
+    tomorrow_str = tomorrow_date.isoformat()
+    t1_title = f"Test Hackathon Deadline {uuid.uuid4().hex[:6]}"
+    t2_title = f"Test Coursework Exam {uuid.uuid4().hex[:6]}"
+
+    async with pool.acquire() as conn:
+        t1 = await structured.create_task(conn, domain="hackathon", title=t1_title, due_date=tomorrow_date, priority="urgent")
+        t2 = await structured.create_task(conn, domain="coursework", title=t2_title, due_date=tomorrow_date, priority="high")
+        id1 = t1["id"]
+        id2 = t2["id"]
+
+    try:
+        result = await dispatch_skill("detect_deadline_conflicts", {"days_ahead": 3}, pool)
+        assert "response" in result
+        assert "data" in result
+        data = result["data"]
+        assert "conflicts" in data
+        assert data["conflicts_count"] >= 1
+        # Check that tomorrow's conflict was detected
+        matching_conflicts = [c for c in data["conflicts"] if c["date"] == tomorrow_str]
+        assert len(matching_conflicts) >= 1
+        assert matching_conflicts[0]["severity"] in ("critical", "moderate")
+    finally:
+        async with pool.acquire() as conn:
+            await conn.execute("DELETE FROM tasks WHERE id = ANY($1)", [id1, id2])
+
+
+@pytest.mark.asyncio
+async def test_agent_runs_list_endpoint(client: AsyncClient):
+    """Enhancement 5: Verify GET /api/agent/runs lists recent runs for the Run History panel."""
+    resp = await client.get("/api/agent/runs?limit=10")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "runs" in data
+    assert "total" in data
+    assert isinstance(data["runs"], list)
+    if data["runs"]:
+        r = data["runs"][0]
+        assert "id" in r
+        assert "goal" in r
+        assert "status" in r
+        assert "steps_count" in r
+
+
+@pytest.mark.asyncio
+async def test_agent_conversation_memory_injection(monkeypatch):
+    """Enhancement 6: Verify run_agent injects recent conversation messages when conversation_id is provided."""
+    from backend.agent import run_agent
+    from backend.memory.db import get_pool
+    from unittest.mock import MagicMock, AsyncMock
+    import uuid
+
+    pool = await get_pool()
+    conv_id = str(uuid.uuid4())
+
+    # Seed conversation messages
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO conversations (id) VALUES ($1) ON CONFLICT (id) DO NOTHING
+            """,
+            conv_id
+        )
+        await conn.execute(
+            """
+            INSERT INTO messages (conversation_id, role, content)
+            VALUES ($1, 'user', 'I need to prepare for my CS 61C midterm tomorrow')
+            """,
+            conv_id
+        )
+
+    try:
+        mock_client = MagicMock()
+        mock_client.chat.completions.create = AsyncMock(return_value=MagicMock(
+            choices=[MagicMock(message=MagicMock(content="Planning schedule with midterm context", tool_calls=[]))],
+            usage=MagicMock(prompt_tokens=10, completion_tokens=10),
+        ))
+
+        steps = []
+        async for s in run_agent(
+            goal="Help me prioritize my week",
+            pool=pool,
+            client=mock_client,
+            conversation_id=conv_id,
+            max_steps=2,
+            enable_critic=False,
+            wait_for_confirmation=False,
+        ):
+            steps.append(s)
+
+        # Verify the OpenAI client received prompt containing recent conversation context
+        assert mock_client.chat.completions.create.called
+        call_kwargs = mock_client.chat.completions.create.call_args.kwargs
+        msgs = call_kwargs.get("messages", [])
+        user_msgs = [m for m in msgs if m.get("role") == "user"]
+        assert len(user_msgs) >= 1
+        assert "CS 61C midterm" in user_msgs[0]["content"]
+    finally:
+        async with pool.acquire() as conn:
+            await conn.execute("DELETE FROM messages WHERE conversation_id = $1", conv_id)
+            await conn.execute("DELETE FROM conversations WHERE id = $1", conv_id)
+
+
+@pytest.mark.asyncio
+async def test_agent_runs_conversation_id_filtering(client: AsyncClient):
+    """Verify GET /api/agent/runs accurately persists and filters by conversation_id."""
+    from backend.agent import save_agent_run
+    from backend.memory.db import get_pool
+    import uuid
+
+    pool = await get_pool()
+    test_conv_id = str(uuid.uuid4())
+    test_run_id = f"test_run_conv_{uuid.uuid4().hex[:8]}"
+
+    await save_agent_run(
+        pool=pool,
+        run_id=test_run_id,
+        goal="Test run linked to conversation",
+        status="completed",
+        accumulated_steps=[],
+        messages=[],
+        pending_actions=[],
+        conversation_id=test_conv_id,
+    )
+
+    try:
+        # 1. Fetch filtered by conversation_id
+        resp = await client.get(f"/api/agent/runs?conversation_id={test_conv_id}")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] >= 1
+        matched = [r for r in data["runs"] if r["id"] == test_run_id]
+        assert len(matched) == 1
+        assert matched[0]["conversation_id"] == test_conv_id
+
+        # 2. Fetch with non-matching conversation_id
+        resp_empty = await client.get("/api/agent/runs?conversation_id=nonexistent_conv_id_123")
+        assert resp_empty.status_code == 200
+        assert resp_empty.json()["total"] == 0
+    finally:
+        async with pool.acquire() as conn:
+            await conn.execute("DELETE FROM agent_runs WHERE id = $1", test_run_id)
+
+
+def test_cli_agent_runs_and_briefing_commands():
+    """Verify CLI commands `agent-runs` and `agent-briefing` execute cleanly."""
+    from typer.testing import CliRunner
+    from cli.assistant_cli import app
+
+    runner = CliRunner()
+
+    # Test agent-runs command
+    res_runs = runner.invoke(app, ["agent-runs", "-n", "5"])
+    assert res_runs.exit_code == 0
+    assert "Compass Agent Runs History" in res_runs.stdout or "No agent runs found" in res_runs.stdout
+
+    # Test agent-briefing command
+    res_briefing = runner.invoke(app, ["agent-briefing"])
+    assert res_briefing.exit_code == 0
+    assert "Morning Executive Briefing" in res_briefing.stdout or "No proactive briefing available" in res_briefing.stdout
+
+
+

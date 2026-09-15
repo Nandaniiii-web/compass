@@ -355,6 +355,23 @@ CHAT_TOOL: Dict[str, Any] = {
     },
 }
 
+DETECT_DEADLINE_CONFLICTS_TOOL: Dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "detect_deadline_conflicts",
+        "description": "Analyze all scheduled tasks and deadlines across hackathon, coursework, and code domains to detect overlapping commitments, resource contention, and deadline clustering within the next 7 days.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "days_ahead": {
+                    "type": "integer",
+                    "description": "Number of days ahead to scan for conflicts (default: 7)",
+                },
+            },
+        },
+    },
+}
+
 # Registered tools exposed to the Nemotron router
 BASE_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
     ADD_TASK_TOOL,
@@ -372,6 +389,7 @@ BASE_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
     DELETE_TASK_TOOL,
     LIST_PROJECTS_TOOL,
     CHAT_TOOL,
+    DETECT_DEADLINE_CONFLICTS_TOOL,
 ]
 
 
@@ -783,21 +801,232 @@ async def handle_list_projects(args: Dict[str, Any], pool: Any) -> Dict[str, Any
 
 @register_skill("query_coursework_notes")
 async def handle_query_coursework_notes(args: Dict[str, Any], pool: Any) -> Dict[str, Any]:
-    """Search coursework notes using vector memory search."""
-    return await handle_query_code_context(args, pool)
+    """Search coursework notes using vector memory search specifically filtered to domain='coursework'."""
+    cw_args = dict(args)
+    cw_args["domain"] = "coursework"
+    if not cw_args.get("query"):
+        for alt_key in ("course", "topic", "notes", "subject"):
+            if cw_args.get(alt_key):
+                cw_args["query"] = str(cw_args[alt_key])
+                break
+    return await handle_query_code_context(cw_args, pool)
 
 
 @register_skill("summarize_across_domains")
 async def handle_summarize_across_domains(args: Dict[str, Any], pool: Any) -> Dict[str, Any]:
-    """Escalates to Nemotron-3 Ultra (550B) over pre-aggregated context for roadmap synthesis."""
-    return await handle_summarize_day(args, pool)
+    """Escalates to Nemotron-3 Ultra (550B) over pre-aggregated multi-domain context for roadmap synthesis.
+
+    Aggregates:
+    1. Active tasks across hackathon, coursework, and code
+    2. Recent code context chunks from vector memory
+    3. Recent coursework note chunks from vector memory
+    4. Tracked projects
+    """
+    from backend.memory import structured
+    from backend.config import get_settings
+    from backend.services.usage import record_usage
+    from openai import AsyncOpenAI
+
+    settings = get_settings()
+    async with pool.acquire() as conn:
+        tasks = await structured.list_tasks(conn, status="open")
+        projects = await structured.list_projects(conn)
+        try:
+            code_chunks = await conn.fetch(
+                "SELECT id, content, tags FROM memory_chunks WHERE domain = 'code' ORDER BY id DESC LIMIT 5"
+            )
+        except Exception:
+            code_chunks = []
+        try:
+            cw_chunks = await conn.fetch(
+                "SELECT id, content, tags FROM memory_chunks WHERE domain = 'coursework' ORDER BY id DESC LIMIT 5"
+            )
+        except Exception:
+            cw_chunks = []
+
+    by_domain: Dict[str, int] = {}
+    for t in tasks:
+        d = t.get("domain", "general")
+        by_domain[d] = by_domain.get(d, 0) + 1
+
+    tasks_context = "\n".join(
+        f"- [{t['domain'].upper()}] {t['title']} (Due: {t.get('due_date') or 'No date'}, Priority: {t.get('priority', 'medium')})"
+        for t in tasks[:15]
+    ) or "No active tasks."
+
+    code_context = "\n".join(
+        f"- [Snippet #{c['id']}]: {c['content'][:150]}..."
+        for c in code_chunks
+    ) or "No recent code snippets."
+
+    cw_context = "\n".join(
+        f"- [Note #{c['id']}]: {c['content'][:150]}..."
+        for c in cw_chunks
+    ) or "No recent coursework notes."
+
+    p_names = ", ".join(f"{p['name']} ({p.get('domain', 'general')})" for p in projects[:10]) or "None"
+
+    combined_context = (
+        f"### 1. Tracked Projects\n{p_names}\n\n"
+        f"### 2. Active Tasks by Domain\n{tasks_context}\n\n"
+        f"### 3. Technical Code Context\n{code_context}\n\n"
+        f"### 4. Coursework Notes\n{cw_context}"
+    )
+
+    if settings.NEBIUS_API_KEY:
+        try:
+            client = AsyncOpenAI(api_key=settings.NEBIUS_API_KEY, base_url=settings.NEBIUS_BASE_URL, timeout=15.0)
+            prompt = (
+                "You are an executive multi-domain roadmap planner powered by Nemotron-3 Ultra (550B). "
+                "Synthesize the following cross-domain state into an integrated executive roadmap. "
+                "Explicitly call out dependencies between hackathon deadlines, coursework exams/labs, and code implementation.\n\n"
+                f"{combined_context}"
+            )
+            resp = await client.chat.completions.create(
+                model=settings.SYNTHESIS_MODEL,
+                messages=[
+                    {"role": "system", "content": "You provide comprehensive, multi-domain executive roadmap briefings."},
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=384,
+            )
+            p_tok = resp.usage.prompt_tokens if resp.usage else len(prompt.split()) * 2
+            c_tok = resp.usage.completion_tokens if resp.usage else 120
+            record_usage(settings.SYNTHESIS_MODEL, p_tok, c_tok)
+            raw_content = resp.choices[0].message.content
+            if raw_content is not None and raw_content.strip():
+                summary = raw_content.strip()
+            else:
+                summary = f"Multi-domain roadmap: {len(tasks)} tasks across {len(by_domain)} domains, {len(code_chunks)} code chunks, {len(cw_chunks)} coursework notes."
+            return {
+                "response": summary,
+                "data": {
+                    "open_tasks_by_domain": by_domain,
+                    "total_tasks": len(tasks),
+                    "code_chunks_count": len(code_chunks),
+                    "coursework_chunks_count": len(cw_chunks),
+                    "projects_count": len(projects),
+                    "model": settings.SYNTHESIS_MODEL,
+                },
+            }
+        except Exception as llm_err:
+            logger.warning(f"SYNTHESIS_MODEL cross-domain summary failed: {llm_err}")
+
+    parts = [f"{d.upper()}: {c}" for d, c in by_domain.items()]
+    summary = (
+        f"🧭 Cross-Domain Roadmap Synthesis: {len(tasks)} active tasks ({', '.join(parts) if parts else 'none'}), "
+        f"{len(code_chunks)} technical code snippets, and {len(cw_chunks)} academic coursework notes indexed across {len(projects)} projects."
+    )
+    return {
+        "response": summary,
+        "data": {
+            "open_tasks_by_domain": by_domain,
+            "total_tasks": len(tasks),
+            "code_chunks_count": len(code_chunks),
+            "coursework_chunks_count": len(cw_chunks),
+            "projects_count": len(projects),
+            "model": settings.SYNTHESIS_MODEL,
+        },
+    }
 
 
 @register_skill("chat")
 async def handle_chat_skill(args: Dict[str, Any], pool: Any) -> Dict[str, Any]:
     """Conversational fallback for greetings, questions, and non-actionable queries."""
+    from backend.config import get_settings
+    from backend.services.usage import record_usage
+    from openai import AsyncOpenAI
+
+    settings = get_settings()
     msg = args.get("message") or args.get("query") or "Hello! I am Compass, your persistent multi-domain AI assistant."
+
+    if settings.NEBIUS_API_KEY and msg != "Hello! I am Compass, your persistent multi-domain AI assistant.":
+        try:
+            client = AsyncOpenAI(api_key=settings.NEBIUS_API_KEY, base_url=settings.NEBIUS_BASE_URL, timeout=10.0)
+            resp = await client.chat.completions.create(
+                model=settings.ROUTER_MODEL,
+                messages=[
+                    {"role": "system", "content": "You are Compass, a smart multi-domain AI assistant managing Hackathon, Coursework, and Code. Be concise, friendly, and helpful."},
+                    {"role": "user", "content": str(msg)}
+                ],
+                max_tokens=150,
+            )
+            p_tok = resp.usage.prompt_tokens if resp.usage else len(str(msg).split()) * 2
+            c_tok = resp.usage.completion_tokens if resp.usage else 50
+            record_usage(settings.ROUTER_MODEL, p_tok, c_tok)
+            content = resp.choices[0].message.content
+            if content and content.strip():
+                return {"response": content.strip(), "data": {"type": "chat", "model": settings.ROUTER_MODEL}}
+        except Exception as e:
+            logger.debug(f"Chat skill LLM fallback: {e}")
+
     return {"response": str(msg), "data": {"type": "chat"}}
+
+
+@register_skill("detect_deadline_conflicts")
+async def handle_detect_deadline_conflicts(args: Dict[str, Any], pool: Any) -> Dict[str, Any]:
+    """Scan active tasks for conflicting deadlines across domains within the next N days."""
+    from backend.memory import structured
+    from datetime import date, timedelta
+
+    days = int(args.get("days_ahead") or 7)
+    today = date.today()
+    cutoff = today + timedelta(days=days)
+
+    async with pool.acquire() as conn:
+        tasks = await structured.list_tasks(conn, status="open")
+
+    by_date: Dict[str, List[Dict[str, Any]]] = {}
+    for t in tasks:
+        d = t.get("due_date")
+        if d:
+            d_str = str(d)[:10]
+            try:
+                task_date = date.fromisoformat(d_str)
+                if today <= task_date <= cutoff:
+                    by_date.setdefault(d_str, []).append(t)
+            except Exception:
+                pass
+
+    conflicts = []
+    for d_str, day_tasks in sorted(by_date.items()):
+        domains = {t.get("domain", "general") for t in day_tasks}
+        priorities = {t.get("priority", "medium") for t in day_tasks}
+        if len(day_tasks) > 1 or ("urgent" in priorities and "hackathon" in domains and "coursework" in domains):
+            is_critical = ("hackathon" in domains and "coursework" in domains) or ("urgent" in priorities)
+            conflicts.append({
+                "date": d_str,
+                "task_count": len(day_tasks),
+                "severity": "critical" if is_critical else "moderate",
+                "domains": list(domains),
+                "tasks": [
+                    {"id": t["id"], "title": t["title"], "domain": t.get("domain"), "priority": t.get("priority")}
+                    for t in day_tasks
+                ],
+                "recommendation": (
+                    f"Reschedule non-urgent tasks on {d_str} to avoid clash between {', '.join(domains)}."
+                    if is_critical
+                    else f"Review task pacing on {d_str} to prevent bottleneck."
+                )
+            })
+
+    if conflicts:
+        summary = (
+            f"⚠️ Detected {len(conflicts)} deadline conflict cluster(s) within the next {days} days. "
+            f"Most critical: {conflicts[0]['date']} with {conflicts[0]['task_count']} tasks across {', '.join(conflicts[0]['domains'])}."
+        )
+    else:
+        summary = f"✅ No critical deadline conflicts detected across domains in the next {days} days."
+
+    return {
+        "response": summary,
+        "data": {
+            "conflicts_count": len(conflicts),
+            "conflicts": conflicts,
+            "scanned_tasks_count": len(tasks),
+            "days_ahead": days,
+        },
+    }
 
 
 async def dispatch_skill(skill_name: str, args: Dict[str, Any], pool: Any) -> Dict[str, Any]:

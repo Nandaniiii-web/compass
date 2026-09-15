@@ -115,6 +115,7 @@ async def save_agent_run(
     accumulated_steps: List[AgentStep],
     messages: List[Dict[str, Any]],
     pending_actions: List[Dict[str, Any]],
+    conversation_id: Optional[str] = None,
 ) -> None:
     """Persist agent run state into agent_runs table."""
     try:
@@ -125,13 +126,14 @@ async def save_agent_run(
         async with pool.acquire() as conn:
             await conn.execute(
                 """
-                INSERT INTO agent_runs (id, goal, status, accumulated_steps, messages, pending_actions)
-                VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb)
+                INSERT INTO agent_runs (id, goal, status, accumulated_steps, messages, pending_actions, conversation_id)
+                VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb, $7)
                 ON CONFLICT (id) DO UPDATE SET
                     status = EXCLUDED.status,
                     accumulated_steps = EXCLUDED.accumulated_steps,
                     messages = EXCLUDED.messages,
                     pending_actions = EXCLUDED.pending_actions,
+                    conversation_id = COALESCE(EXCLUDED.conversation_id, agent_runs.conversation_id),
                     updated_at = now()
                 """,
                 run_id,
@@ -140,6 +142,7 @@ async def save_agent_run(
                 steps_json,
                 messages_json,
                 pending_json,
+                conversation_id,
             )
     except Exception as e:
         logger.warning(f"Failed to save agent run {run_id}: {e}")
@@ -156,6 +159,7 @@ async def get_agent_run(pool: Any, run_id: str) -> Optional[Dict[str, Any]]:
                 "id": row["id"],
                 "goal": row["goal"],
                 "status": row["status"],
+                "conversation_id": row["conversation_id"] if "conversation_id" in row else None,
                 "accumulated_steps": json.loads(row["accumulated_steps"]) if isinstance(row["accumulated_steps"], str) else row["accumulated_steps"],
                 "messages": json.loads(row["messages"]) if isinstance(row["messages"], str) else row["messages"],
                 "pending_actions": json.loads(row["pending_actions"]) if isinstance(row["pending_actions"], str) else row["pending_actions"],
@@ -414,6 +418,7 @@ async def run_agent(
     wait_for_confirmation: bool = False,
     client: Optional[AsyncOpenAI] = None,
     settings: Any = None,
+    conversation_id: Optional[str] = None,
 ) -> AsyncGenerator[AgentStep, None]:
     """
     Core ReAct agent loop.
@@ -469,6 +474,8 @@ async def run_agent(
     if action in ("approve", "reject"):
         if existing_run:
             goal = existing_run.get("goal", goal)
+            if existing_run.get("conversation_id") and not conversation_id:
+                conversation_id = existing_run.get("conversation_id")
             messages = existing_run.get("messages", [])
             pending_confirmations = existing_run.get("pending_actions", [])
             step_num = len(existing_run.get("accumulated_steps", []))
@@ -534,7 +541,7 @@ async def run_agent(
             accumulated_steps.append(obs_step)
             pending_confirmations.clear()
             if pool:
-                await save_agent_run(pool, run_id, goal, "running", accumulated_steps, messages, pending_confirmations)
+                await save_agent_run(pool, run_id, goal, "running", accumulated_steps, messages, pending_confirmations, conversation_id=conversation_id)
 
         elif action == "approve":
             # EXECUTE APPROVED MUTATIONS
@@ -563,17 +570,30 @@ async def run_agent(
                 tools_used.append(r.get("tool", ""))
             pending_confirmations.clear()
             if pool:
-                await save_agent_run(pool, run_id, goal, "running", accumulated_steps, messages, pending_confirmations)
+                await save_agent_run(pool, run_id, goal, "running", accumulated_steps, messages, pending_confirmations, conversation_id=conversation_id)
     else:
         # New run initialization
+        conv_context = ""
+        if conversation_id and pool:
+            try:
+                from backend.memory import conversations
+                async with pool.acquire() as conn:
+                    recent_msgs = await conversations.get_recent_messages(conn, conversation_id, limit=5)
+                if recent_msgs:
+                    history_lines = [f"{m['role'].upper()}: {m['content']}" for m in recent_msgs]
+                    conv_context = "\n\nRecent User Conversation Context:\n" + "\n".join(history_lines)
+            except Exception as e:
+                logger.debug(f"Could not load conversation context: {e}")
+
+        user_content = f"{goal}{conv_context}" if conv_context else goal
         messages = cast(List[Dict[str, Any]], [
             {"role": "system", "content": _build_agent_system_prompt(
                 [t["function"]["name"] for t in agent_tools if "function" in t]
             )},
-            {"role": "user", "content": goal},
+            {"role": "user", "content": user_content},
         ])
         if pool:
-            await save_agent_run(pool, run_id, goal, "running", accumulated_steps, messages, pending_confirmations)
+            await save_agent_run(pool, run_id, goal, "running", accumulated_steps, messages, pending_confirmations, conversation_id=conversation_id)
 
     # --- ReAct Loop ---
     for iteration in range(max_steps):
@@ -749,6 +769,7 @@ async def run_agent(
                             await save_agent_run(
                                 pool, run_id, goal, "paused",
                                 accumulated_steps, messages, pending_confirmations,
+                                conversation_id=conversation_id,
                             )
 
                         if wait_for_confirmation:
@@ -766,6 +787,7 @@ async def run_agent(
                                     await save_agent_run(
                                         pool, run_id, goal, "expired",
                                         accumulated_steps, messages, pending_confirmations,
+                                        conversation_id=conversation_id,
                                     )
                                 step_num += 1
                                 timeout_step = AgentStep(
@@ -815,7 +837,7 @@ async def run_agent(
                                 accumulated_steps.append(rej_step)
                                 pending_confirmations.clear()
                                 if pool:
-                                    await save_agent_run(pool, run_id, goal, "running", accumulated_steps, messages, pending_confirmations)
+                                    await save_agent_run(pool, run_id, goal, "running", accumulated_steps, messages, pending_confirmations, conversation_id=conversation_id)
                                 continue  # Continue loop for re-planning!
                             else:
                                 confirmed_set.add(action_key)
@@ -1069,7 +1091,7 @@ async def run_agent(
     accumulated_steps.append(done_step)
 
     if pool:
-        await save_agent_run(pool, run_id, goal, "completed", accumulated_steps, messages, pending_confirmations)
+        await save_agent_run(pool, run_id, goal, "completed", accumulated_steps, messages, pending_confirmations, conversation_id=conversation_id)
 
 
 async def _run_critic_pass(

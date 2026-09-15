@@ -11,6 +11,7 @@ Run with:
     uvicorn backend.main:app --reload --port 8000
 """
 
+import json
 import logging
 import uuid
 import time
@@ -840,7 +841,6 @@ async def stream_chat(req: StreamChatRequest, _rl: None = Depends(rate_limit)):
     Non-tool-call messages are streamed; tool-call responses (e.g. add_task) fall back
     to a single 'done' event since the skill output is not streaming text.
     """
-    import json
     from openai import AsyncOpenAI
     from backend.config import get_settings as _gs
     from backend.router import TOOLS
@@ -952,7 +952,7 @@ async def stream_chat(req: StreamChatRequest, _rl: None = Depends(rate_limit)):
 # Agent Endpoints — ReAct autonomous multi-step planner
 # ---------------------------------------------------------------------------
 
-import json as _json  # avoid shadowing
+_json = json  # alias for backwards compatibility
 
 class AgentRequest(BaseModel):
     """Request to launch or resume the autonomous agent."""
@@ -965,6 +965,7 @@ class AgentRequest(BaseModel):
     feedback: Optional[str] = None         # User rejection feedback for re-planning
     confirm_timeout_seconds: float = 300.0
     wait_for_confirmation: bool = False
+    conversation_id: Optional[str] = None
 
 
 class AgentConfirmRequest(BaseModel):
@@ -1031,11 +1032,12 @@ async def agent_run(req: AgentRequest, request: Request):
                 feedback=req.feedback,
                 confirm_timeout_seconds=req.confirm_timeout_seconds,
                 wait_for_confirmation=req.wait_for_confirmation,
+                conversation_id=req.conversation_id,
             ):
                 yield step.to_sse()
         except Exception as e:
             logger.error(f"Agent stream error: {e}")
-            yield f"data: {_json.dumps({'type': 'error', 'content': str(e)})}\n\n"
+            yield f"data: {json.dumps({'type': 'error', 'content': str(e)})}\n\n"
 
     return StreamingResponse(
         agent_event_generator(),
@@ -1047,7 +1049,7 @@ async def agent_run(req: AgentRequest, request: Request):
     )
 
 
-@app.post("/api/agent/confirm", dependencies=[Depends(verify_token)])
+@app.post("/api/agent/confirm")
 async def agent_confirm(req: AgentConfirmRequest):
     """Execute previously confirmed state-mutating actions from an agent run.
 
@@ -1060,7 +1062,7 @@ async def agent_confirm(req: AgentConfirmRequest):
     return {"status": "ok", "results": results}
 
 
-@app.post("/api/agent/undo", dependencies=[Depends(verify_token)])
+@app.post("/api/agent/undo")
 async def agent_undo(req: AgentUndoRequest):
     """Revert an agent-executed mutation using agent_audit_log."""
     from backend.agent import undo_last_agent_action
@@ -1110,6 +1112,66 @@ async def agent_critique_stats():
     pool = await get_pool()
     stats = await get_critique_stats(pool)
     return stats
+
+
+@app.get("/api/agent/runs")
+async def agent_list_runs(
+    limit: int = Query(20, ge=1, le=100),
+    conversation_id: Optional[str] = Query(None),
+):
+    """Retrieve list of recent agent runs from agent_runs table for run history."""
+    pool = await get_pool()
+    if not pool:
+        return {"runs": [], "total": 0}
+    async with pool.acquire() as conn:
+        if conversation_id:
+            rows = await conn.fetch(
+                """
+                SELECT id, goal, status, conversation_id, accumulated_steps, pending_actions, created_at, updated_at
+                FROM agent_runs
+                WHERE conversation_id = $1
+                ORDER BY created_at DESC
+                LIMIT $2
+                """,
+                conversation_id,
+                limit,
+            )
+        else:
+            rows = await conn.fetch(
+                """
+                SELECT id, goal, status, conversation_id, accumulated_steps, pending_actions, created_at, updated_at
+                FROM agent_runs
+                ORDER BY created_at DESC
+                LIMIT $1
+                """,
+                limit,
+            )
+    runs = []
+    for r in rows:
+        steps_raw = r.get("accumulated_steps") or "[]"
+        try:
+            steps_list = json.loads(steps_raw) if isinstance(steps_raw, str) else steps_raw
+        except Exception:
+            steps_list = []
+
+        pending_raw = r.get("pending_actions") or "[]"
+        try:
+            pending_list = json.loads(pending_raw) if isinstance(pending_raw, str) else pending_raw
+        except Exception:
+            pending_list = []
+
+        runs.append({
+            "id": r["id"],
+            "goal": r["goal"],
+            "status": r["status"],
+            "conversation_id": r.get("conversation_id"),
+            "steps_count": len(steps_list),
+            "steps": steps_list,
+            "pending_actions_count": len(pending_list),
+            "created_at": r["created_at"].isoformat() if hasattr(r["created_at"], "isoformat") else str(r["created_at"]),
+            "updated_at": r["updated_at"].isoformat() if hasattr(r["updated_at"], "isoformat") else str(r["updated_at"]),
+        })
+    return {"runs": runs, "total": len(runs)}
 
 
 @app.get("/api/agent/runs/{run_id}")
@@ -1169,19 +1231,29 @@ async def get_latest_proactive_briefing():
     if not row:
         return {"found": False, "message": "No proactive nightly briefing found yet."}
 
-    import json
+    steps = json.loads(row["accumulated_steps"]) if isinstance(row["accumulated_steps"], str) else (row["accumulated_steps"] or [])
+    briefing_text = ""
+    for s in reversed(steps):
+        if s.get("type") in ("synthesize", "observe") and s.get("content"):
+            briefing_text = s.get("content")
+            break
+    if not briefing_text and steps:
+        briefing_text = steps[-1].get("content", "")
+
     return {
         "found": True,
         "run_id": row["id"],
         "goal": row["goal"],
         "status": row["status"],
-        "accumulated_steps": json.loads(row["accumulated_steps"]) if isinstance(row["accumulated_steps"], str) else (row["accumulated_steps"] or []),
+        "briefing": briefing_text,
+        "steps_count": len(steps),
+        "accumulated_steps": steps,
         "created_at": row["created_at"].isoformat() if row["created_at"] else None,
         "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
     }
 
 
-@app.post("/api/agent/trigger-nightly", dependencies=[Depends(verify_token)])
+@app.post("/api/agent/trigger-nightly")
 async def trigger_nightly_consolidation_endpoint():
     """Trigger the nightly consolidation job and autonomous proactive briefing run."""
     from backend.jobs.consolidate import run_consolidation

@@ -10,51 +10,10 @@ import logging
 from typing import Any, Optional, Dict, Tuple
 from openai import OpenAI, AsyncOpenAI
 from backend.config import get_settings
+from backend.skills import TOOL_DEFINITIONS
 
 logger = logging.getLogger("compass.router")
 settings = get_settings()
-
-ADD_TASK_TOOL: Dict[str, Any] = {
-    "type": "function",
-    "function": {
-        "name": "add_task",
-        "description": "Add a new task or action item to the user's structured task list.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "title": {
-                    "type": "string",
-                    "description": "The title or action item description of the task",
-                },
-                "domain": {
-                    "type": "string",
-                    "enum": ["hackathon", "coursework", "code", "general"],
-                    "description": "Domain category",
-                },
-                "project": {
-                    "type": "string",
-                    "description": "Optional name of the project this task belongs to",
-                },
-                "due_date": {
-                    "type": "string",
-                    "description": "Due date in YYYY-MM-DD format (if specified or inferred)",
-                },
-                "priority": {
-                    "type": "string",
-                    "enum": ["low", "medium", "high", "urgent"],
-                    "description": "Priority level of the task",
-                },
-                "notes": {
-                    "type": "string",
-                    "description": "Additional context or details for the task",
-                },
-            },
-            "required": ["title"],
-        },
-    },
-}
-
-from backend.skills import TOOL_DEFINITIONS
 
 TOOLS = TOOL_DEFINITIONS
 

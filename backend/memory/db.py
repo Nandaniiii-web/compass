@@ -34,8 +34,10 @@ async def _ensure_tables(pool: asyncpg.Pool) -> None:
             created_at         TIMESTAMPTZ   NOT NULL DEFAULT now(),
             updated_at         TIMESTAMPTZ   NOT NULL DEFAULT now()
         );
-        CREATE INDEX IF NOT EXISTS idx_agent_runs_status     ON agent_runs(status);
-        CREATE INDEX IF NOT EXISTS idx_agent_runs_created_at ON agent_runs(created_at);
+        ALTER TABLE agent_runs ADD COLUMN IF NOT EXISTS conversation_id TEXT;
+        CREATE INDEX IF NOT EXISTS idx_agent_runs_status          ON agent_runs(status);
+        CREATE INDEX IF NOT EXISTS idx_agent_runs_created_at      ON agent_runs(created_at);
+        CREATE INDEX IF NOT EXISTS idx_agent_runs_conversation_id ON agent_runs(conversation_id);
 
         CREATE TABLE IF NOT EXISTS agent_audit_log (
             id                 SERIAL        PRIMARY KEY,

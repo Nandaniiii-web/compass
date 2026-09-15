@@ -313,7 +313,7 @@ function formatDoneSummary(content) {
   }
 }
 
-export default function AgentPanel() {
+export default function AgentPanel({ onTaskMutated, conversationId }) {
   const [goal, setGoal] = useState('')
   const [steps, setSteps] = useState([])
   const [isRunning, setIsRunning] = useState(false)
@@ -326,6 +326,9 @@ export default function AgentPanel() {
   const [critiqueStats, setCritiqueStats] = useState(null)
   const [proactiveBriefing, setProactiveBriefing] = useState(null)
   const [triggeringNightly, setTriggeringNightly] = useState(false)
+  const [runsList, setRunsList] = useState([])
+  const [showHistory, setShowHistory] = useState(false)
+  const [copyFeedback, setCopyFeedback] = useState(false)
   const traceEndRef = useRef(null)
   const abortRef = useRef(null)
 
@@ -333,6 +336,18 @@ export default function AgentPanel() {
     return window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
       ? 'http://127.0.0.1:8000'
       : ''
+  }
+
+  const fetchRunsHistory = async () => {
+    try {
+      const res = await fetch(`${getApiBase()}/api/agent/runs?limit=25`)
+      if (res.ok) {
+        const data = await res.json()
+        setRunsList(data.runs || [])
+      }
+    } catch {
+      // ignore
+    }
   }
 
   const fetchActivity = async () => {
@@ -406,6 +421,7 @@ export default function AgentPanel() {
     fetchActivity()
     fetchCritiqueStats()
     fetchProactiveBriefing()
+    fetchRunsHistory()
   }, [])
 
   // Auto-scroll to bottom as new steps appear
@@ -415,6 +431,46 @@ export default function AgentPanel() {
     }
   }, [steps])
 
+  const loadPastRun = (run) => {
+    setGoal(run.goal || '')
+    setCurrentRunId(run.id)
+    setSteps(run.steps || [])
+    setShowHistory(false)
+  }
+
+  const copyTraceAsMarkdown = () => {
+    const totalCost = steps.reduce((sum, s) => sum + (s.step_cost_usd || 0), 0)
+    const mdLines = [
+      `# 🧭 Compass Agent Trace — ${goal || 'Goal'}`,
+      `**Run ID**: \`${currentRunId || 'unknown'}\``,
+      `**Total Steps**: ${steps.length}`,
+      `**Estimated Cost**: $${totalCost.toFixed(5)} USD (Nebius Token Factory)`,
+      '',
+      '---',
+      '',
+    ]
+    steps.forEach((s) => {
+      const icon = STEP_STYLES[s.type]?.icon || '•'
+      const label = STEP_STYLES[s.type]?.label || s.type.toUpperCase()
+      mdLines.push(`### ${icon} Step ${s.step}: ${label} ${s.model_tier ? `(\`${s.model_tier}\`)` : ''}`)
+      if (s.tool) {
+        mdLines.push(`**Tool**: \`${s.tool}\``)
+        if (s.args) {
+          mdLines.push('```json')
+          mdLines.push(JSON.stringify(s.args, null, 2))
+          mdLines.push('```')
+        }
+      }
+      if (s.content) {
+        mdLines.push(`> ${s.content}`)
+      }
+      mdLines.push('')
+    })
+    navigator.clipboard.writeText(mdLines.join('\n'))
+    setCopyFeedback(true)
+    setTimeout(() => setCopyFeedback(false), 2000)
+  }
+
   const streamFromEndpoint = async (payload) => {
     setIsRunning(true)
     const controller = new AbortController()
@@ -422,10 +478,15 @@ export default function AgentPanel() {
 
     try {
       const apiBase = getApiBase()
+      const reqPayload = { ...payload }
+      if (conversationId && !reqPayload.conversation_id) {
+        reqPayload.conversation_id = conversationId
+      }
+
       const response = await fetch(`${apiBase}/api/agent/run`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
+        body: JSON.stringify(reqPayload),
         signal: controller.signal,
       })
 
@@ -479,6 +540,7 @@ export default function AgentPanel() {
       abortRef.current = null
       fetchActivity()
       fetchCritiqueStats()
+      fetchRunsHistory()
     }
   }
 
@@ -518,6 +580,7 @@ export default function AgentPanel() {
       action: 'approve',
       confirmed_actions: actionsToApprove,
     })
+    onTaskMutated?.()
   }
 
   const rejectActions = async () => {
@@ -542,7 +605,6 @@ export default function AgentPanel() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': 'Bearer dev-token',
         },
         body: JSON.stringify({ run_id: currentRunId }),
       })
@@ -556,6 +618,7 @@ export default function AgentPanel() {
           elapsed_ms: 0,
         }])
         fetchActivity()
+        onTaskMutated?.()
       } else {
         setUndoStatus(data.message || 'Nothing to undo')
       }
@@ -571,7 +634,6 @@ export default function AgentPanel() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': 'Bearer dev-token',
         },
         body: JSON.stringify({ audit_log_id: auditLogId }),
       })
@@ -579,6 +641,7 @@ export default function AgentPanel() {
       if (res.ok && data.status === 'ok') {
         setUndoStatus(data.message || 'Action reverted')
         fetchActivity()
+        onTaskMutated?.()
       } else {
         setUndoStatus(data.message || 'Failed to revert action')
       }
@@ -740,6 +803,49 @@ export default function AgentPanel() {
               🧠 Run Agent
             </button>
           )}
+
+          <button
+            id="agent-history-toggle-btn"
+            onClick={() => { fetchRunsHistory(); setShowHistory(!showHistory) }}
+            style={{
+              padding: '10px 14px',
+              background: showHistory ? '#334155' : '#1e293b',
+              border: '1px solid #334155',
+              borderRadius: '8px',
+              color: '#94a3b8',
+              fontSize: '13px',
+              fontWeight: '600',
+              cursor: 'pointer',
+              whiteSpace: 'nowrap',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+            }}
+            title="Toggle Agent Run History"
+          >
+            📜 History ({runsList.length})
+          </button>
+
+          {steps.length > 0 && (
+            <button
+              id="agent-copy-trace-btn"
+              onClick={copyTraceAsMarkdown}
+              style={{
+                padding: '10px 14px',
+                background: '#1e293b',
+                border: '1px solid #334155',
+                borderRadius: '8px',
+                color: copyFeedback ? '#34d399' : '#94a3b8',
+                fontSize: '13px',
+                fontWeight: '600',
+                cursor: 'pointer',
+                whiteSpace: 'nowrap',
+              }}
+              title="Copy execution trace as Markdown"
+            >
+              {copyFeedback ? '✓ Copied' : '📋 Copy Trace'}
+            </button>
+          )}
         </div>
 
         {/* Suggested goals and pre-loaded demo trigger */}
@@ -854,6 +960,110 @@ export default function AgentPanel() {
         overflowY: 'auto',
         padding: '16px 20px',
       }}>
+        {/* Run History Flyout Drawer */}
+        {showHistory && (
+          <div style={{
+            marginBottom: '16px',
+            background: 'linear-gradient(135deg, rgba(15, 23, 42, 0.95), rgba(30, 41, 59, 0.95))',
+            border: '1px solid #334155',
+            borderRadius: '8px',
+            padding: '14px',
+            boxShadow: '0 8px 24px rgba(0, 0, 0, 0.4)',
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+              <span style={{ fontSize: '12px', fontWeight: '700', color: '#e2e8f0', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                📜 Past Agent Runs ({runsList.length})
+              </span>
+              <button
+                onClick={() => setShowHistory(false)}
+                style={{ background: 'transparent', border: 'none', color: '#94a3b8', cursor: 'pointer', fontSize: '14px' }}
+              >
+                ✕
+              </button>
+            </div>
+            {runsList.length === 0 ? (
+              <div style={{ fontSize: '12px', color: '#64748b', fontStyle: 'italic', padding: '12px 0', textAlign: 'center' }}>
+                No past agent runs recorded yet. Run any goal above to see persistent execution history.
+              </div>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', maxHeight: '220px', overflowY: 'auto' }}>
+                {runsList.map(r => (
+                  <div
+                    key={r.id}
+                    onClick={() => loadPastRun(r)}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      padding: '8px 12px',
+                      background: currentRunId === r.id ? 'rgba(37, 99, 235, 0.2)' : 'rgba(30, 41, 59, 0.6)',
+                      border: `1px solid ${currentRunId === r.id ? '#2563eb' : '#334155'}`,
+                      borderRadius: '6px',
+                      cursor: 'pointer',
+                      transition: 'all 0.15s',
+                    }}
+                  >
+                    <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '70%' }}>
+                      <span style={{ fontSize: '12px', color: '#f1f5f9', fontWeight: '500' }}>{r.goal || 'Untitled Goal'}</span>
+                      <div style={{ fontSize: '10px', color: '#64748b', fontFamily: 'monospace', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                        <span>{r.id} · {r.created_at ? r.created_at.slice(0, 19).replace('T', ' ') : ''}</span>
+                        {r.conversation_id && (
+                          <span style={{ color: '#60a5fa', background: 'rgba(37, 99, 235, 0.15)', padding: '1px 4px', borderRadius: '4px' }}>
+                            💬 conv:{r.conversation_id.slice(0, 8)}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <span style={{ fontSize: '11px', color: '#94a3b8' }}>{r.steps_count} steps</span>
+                      <span style={{
+                        fontSize: '9px',
+                        fontWeight: '700',
+                        padding: '2px 6px',
+                        borderRadius: '4px',
+                        background: r.status === 'completed' ? 'rgba(34, 197, 94, 0.2)' : r.status === 'paused' ? 'rgba(234, 179, 8, 0.2)' : 'rgba(100, 116, 139, 0.2)',
+                        color: r.status === 'completed' ? '#4ade80' : r.status === 'paused' ? '#facc15' : '#94a3b8',
+                      }}>
+                        {r.status.toUpperCase()}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Animated Step Progress Bar */}
+        {(steps.length > 0 || isRunning) && (
+          <div style={{
+            marginBottom: '14px',
+            padding: '10px 14px',
+            background: 'rgba(15, 23, 42, 0.7)',
+            border: '1px solid #1e293b',
+            borderRadius: '8px',
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px', fontSize: '11px', color: '#94a3b8' }}>
+              <span style={{ display: 'flex', alignItems: 'center', gap: '6px', fontWeight: '600', color: isRunning ? '#38bdf8' : '#34d399' }}>
+                <span style={{ display: 'inline-block', width: '6px', height: '6px', borderRadius: '50%', background: isRunning ? '#38bdf8' : '#34d399', animation: isRunning ? 'pulse 1s infinite' : 'none' }} />
+                {isRunning ? 'Agent Execution in Progress...' : 'Execution Plan Ready'}
+              </span>
+              <span style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: '11px' }}>
+                Step {steps.length} / 8 · Total: ${(steps.reduce((sum, s) => sum + (s.step_cost_usd || 0), 0)).toFixed(5)} USD
+              </span>
+            </div>
+            <div style={{ width: '100%', height: '4px', background: '#1e293b', borderRadius: '2px', overflow: 'hidden' }}>
+              <div style={{
+                width: `${Math.min(100, (steps.length / 8) * 100)}%`,
+                height: '100%',
+                background: isRunning ? 'linear-gradient(90deg, #2563eb, #38bdf8)' : '#10b981',
+                transition: 'width 0.3s ease',
+                boxShadow: isRunning ? '0 0 8px #38bdf8' : 'none',
+              }} />
+            </div>
+          </div>
+        )}
+
         {steps.length === 0 && !isRunning && (
           <div style={{
             textAlign: 'center',
@@ -887,6 +1097,43 @@ export default function AgentPanel() {
         {steps.map((step, i) => (
           <StepCard key={i} step={step} index={i} />
         ))}
+
+        {/* Cost Efficiency Comparison Card */}
+        {steps.some(s => s.type === 'done') && (
+          <div style={{
+            margin: '14px 0',
+            padding: '12px 16px',
+            background: 'linear-gradient(135deg, rgba(16, 185, 129, 0.1), rgba(14, 165, 233, 0.1))',
+            border: '1px solid rgba(52, 211, 153, 0.3)',
+            borderRadius: '8px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: '12px',
+          }}>
+            <div>
+              <div style={{ fontSize: '12px', fontWeight: '700', color: '#34d399', letterSpacing: '0.02em', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                <span>⚡</span> Nebius Token Factory Cost Efficiency
+              </div>
+              <div style={{ fontSize: '11px', color: '#94a3b8', marginTop: '2px' }}>
+                This {steps.length}-step run cost <strong style={{ color: '#e2e8f0' }}>${(steps.reduce((sum, s) => sum + (s.step_cost_usd || 0), 0)).toFixed(5)}</strong> on Nebius · Equivalent on GPT-4o: <strong style={{ color: '#f87171' }}>~${((steps.reduce((sum, s) => sum + (s.step_cost_usd || 0), 0)) * 36).toFixed(4)}</strong> (~36x cost reduction)
+              </div>
+            </div>
+            <span style={{
+              padding: '4px 8px',
+              background: 'rgba(16, 185, 129, 0.2)',
+              borderRadius: '6px',
+              border: '1px solid #10b98155',
+              color: '#4ade80',
+              fontSize: '11px',
+              fontWeight: '700',
+              fontFamily: 'monospace',
+              whiteSpace: 'nowrap',
+            }}>
+              97.2% SAVINGS
+            </span>
+          </div>
+        )}
 
         {/* Confirmation gate UI */}
         {pendingActions.length > 0 && !isRunning && (

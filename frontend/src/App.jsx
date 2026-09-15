@@ -198,7 +198,13 @@ export default function App() {
             onSelectDomain={setSelectedDomain}
           />
         ) : activeTab === 'agent' ? (
-          <AgentPanel />
+          <AgentPanel
+            onTaskMutated={() => {
+              loadTasks(selectedDomain)
+              refreshUsage()
+            }}
+            conversationId={conversationId}
+          />
         ) : (
           <ChatPanel
             messages={messages}
