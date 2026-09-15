@@ -1,14 +1,14 @@
 # Compass Agent Subsystem — Complete Changes & Delivery Report
 
 **Canonical Repository:** `Ratnesh-101/compass`  
-**Active Pull Request:** **[Ratnesh-101/compass PR #3](https://github.com/Ratnesh-101/compass/pull/3)** (`feat: Compass Agent Subsystem...`)  
-**Development Fork:** `Nandaniiii-web/compass` (branch: `feature/compass-agent`, fast-forward synced to `main`)  
+**Active Pull Request:** **[Ratnesh-101/compass PR #6](https://github.com/Ratnesh-101/compass/pull/6)** (`feat(agent): close subsystem gaps, add deadline conflict detection, conversation linkage, and CLI/UI history`)  
+**Development Fork:** `Nandaniiii-web/compass` (branch: `feature/agent-gap-closures`, fast-forward synced to `upstream/main`)  
 **Runtime Environment:** **Python 3.12.4** (`pytest 9.1.1`, `pluggy 1.6.0`)  
 **Database Topology:**
 - **Production Instance (Render Backend):** Neon Serverless PostgreSQL Frankfurt (`ep-sweet-fire-b2y9w95z-pooler.eu-central-1.aws.neon.tech`) configured on `compass-backend-qryu.onrender.com`.
 - **Development & Verification Instance:** Neon Serverless PostgreSQL Ohio (`ep-restless-frog-a5icimeu-pooler.us-east-2.aws.neon.tech`), used for safe, isolated test execution, mutation gating, and audit rollbacks without mutating production data.
-- **Auto-Migration:** Schema additions (`agent_runs`, `agent_audit_log`) are self-applying on startup via `backend/memory/db.py:init_db`.  
-**Test Suite Status:** **63 passed, 0 skipped, 0 failed** in 459.70s
+- **Auto-Migration:** Schema additions (`agent_runs`, `agent_audit_log`, `conversation_id` column) are self-applying on startup via `backend/memory/db.py:init_db`.  
+**Test Suite Status:** **70 passed, 0 skipped, 0 failed** in 844.38s (100% passing)
 
 ---
 
