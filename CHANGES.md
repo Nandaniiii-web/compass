@@ -496,6 +496,55 @@ While traditional LLM copilots often attempt to calculate times directly in natu
   - `test_schedule_propose_endpoint`: Verified `/api/schedule/propose` endpoint.
 - **Status**: **13 of 13 passed** in 46.90s.
 
+---
+
+## 11. Reactive Dynamic Scheduling, Dependency DAG & Google OAuth 2.0
+
+### 11.1 Honest Google Calendar Mode & OAuth 2.0 Flow
+- **Honest Mode Reporting**: When no OAuth tokens exist in `calendar_connections`, the system explicitly reports mode as `"demo"`, `is_simulated: true`, and label `"Google Calendar: demo-scholar@compass.ai (simulated / demo mode — live OAuth not yet connected)"`.
+- **Live OAuth Connection**:
+  - `GET /api/calendar/connect`: Generates real Google OAuth 2.0 URL requesting `https://www.googleapis.com/auth/calendar.readonly` with offline access.
+  - `GET /api/calendar/callback`: Exchanges authorization code for tokens, encrypts tokens, and stores connection in PostgreSQL `calendar_connections`. Includes mock fallback for offline demo environments.
+  - `POST /api/calendar/disconnect`: Deletes active tokens and cleanly reverts to demo mode.
+- **Symmetric Encryption at Rest**: `backend/services/oauth.py` provides `encrypt_token` and `decrypt_token` using HMAC-SHA256 authenticated symmetric stream cipher without external native dependencies.
+
+### 11.2 Task Dependency Graph & Cycle Prevention
+- **Schema**: Added `task_dependencies (id, task_id, depends_on_task_id, created_at)` table in PostgreSQL with foreign keys and unique constraints.
+- **Cycle Prevention**: Added recursive CTE reachability check in `add_task_dependency` to prevent circular dependencies before insertion.
+- **Downstream Traversal**: `get_downstream_tasks` traverses the transitive closure of dependents in topological order.
+- **Endpoints**:
+  - `GET /api/tasks/{task_id}/dependencies`
+  - `POST /api/tasks/{task_id}/dependencies`
+  - `DELETE /api/tasks/{task_id}/dependencies/{depends_on_task_id}`
+
+### 11.3 Topological Slot Allocation & Reactive Re-planning
+- **Topological Slot Allocation**: Enhanced `allocate_task_slots` in `backend/services/scheduler.py` to enforce that prerequisite tasks finish before child tasks start: `scheduled_start(child) >= scheduled_end(parent) + buffer_minutes`.
+- **Slipped Task Detection**: `find_slipped_tasks` detects uncompleted tasks (`status != 'done'`) whose `scheduled_end` has passed `now()`.
+- **Cascading Re-planning**: `replan_slipped_tasks` identifies all transitive downstream dependents of slipped tasks and reschedules only the affected subtree into future working windows, keeping unaffected tasks stable.
+- **Human Gate Integration**: `POST /api/schedule/reactive-check` stages a pending agent run with `confirm_request` and `commit_schedule` payload, preserving human review before mutating the schedule.
+- **Cascading Conflict Detection**: Enhanced `detect_schedule_conflicts` to flag direct overlaps, dependency timing violations, deadline breaches, and slipped deadlines.
+- **Nightly Consolidation Integration**: Updated `backend/jobs/consolidate.py` with `check_slipped_schedules` to audit and log slipped tasks during nightly consolidation.
+
+### 11.4 Frontend Integration
+- **Status Badge**: Dynamically indicates `(simulated / demo mode — live OAuth not yet connected)` vs `(Live OAuth Connected)`.
+- **Interactive Controls**: Added `🔗 Connect Google Account` link, `Disconnect` button, and `⚡ Scan Schedule Slip` button in `CalendarView.jsx`.
+- **API Client**: Added `checkReactiveSchedule` and `fetchScheduleConflicts` in `frontend/src/api/client.js`.
+
+### 11.5 Automated Test Suite (`tests/test_reactive_scheduling.py`)
+- **11 Net-New Tests**:
+  - `test_oauth_url_and_crypto`: Verified OAuth URL and encryption roundtrip.
+  - `test_oauth_mock_exchange`: Verified token exchange demo fallback.
+  - `test_topological_slot_allocation_respects_prerequisites`: Verified parent finish before child start.
+  - `test_topological_allocation_unfulfilled_prerequisite`: Verified unplaced prerequisite handling.
+  - `test_find_slipped_tasks`: Verified detection of past-due uncompleted tasks.
+  - `test_replan_slipped_tasks_scoping`: Verified cascading re-planning limited to affected tasks.
+  - `test_detect_schedule_conflicts_dependency_violations`: Verified dependency violation detection.
+  - `test_detect_schedule_conflicts_slipped_and_deadline`: Verified deadline and slip detection.
+  - `test_oauth_endpoints`: Verified connect, callback, and disconnect endpoints.
+  - `test_reactive_schedule_check_endpoint`: Verified reactive check endpoint and staging.
+  - `test_schedule_conflicts_endpoint`: Verified conflicts API endpoint.
+
+
 
 
 

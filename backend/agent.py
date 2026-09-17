@@ -37,7 +37,7 @@ logger = logging.getLogger("compass.agent")
 # Tools that mutate state require human confirmation before execution
 # ---------------------------------------------------------------------------
 MUTATING_TOOLS = frozenset({"add_task", "edit_task", "update_task_status", "delete_task", "log_code_snippet", "log_code_context", "commit_schedule"})
-READ_ONLY_TOOLS = frozenset({"query_tasks", "query_code_context", "query_coursework_tasks", "get_hackathon_deadlines", "summarize_day", "search_web", "list_projects", "query_coursework_notes", "chat", "summarize_across_domains", "detect_deadline_conflicts", "get_calendar_availability", "propose_schedule"})
+READ_ONLY_TOOLS = frozenset({"query_tasks", "query_code_context", "query_coursework_tasks", "get_hackathon_deadlines", "summarize_day", "search_web", "list_projects", "query_coursework_notes", "chat", "summarize_across_domains", "detect_deadline_conflicts", "get_calendar_availability", "propose_schedule", "detect_schedule_conflicts"})
 
 # In-memory registry for live SSE confirmation events: run_id -> (asyncio.Event, outcome_dict)
 _PENDING_CONFIRMATION_EVENTS: Dict[str, Tuple[asyncio.Event, Dict[str, Any]]] = {}

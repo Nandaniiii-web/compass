@@ -346,6 +346,37 @@ async def trigger_proactive_nightly_run(
 
 
 # ---------------------------------------------------------------------------
+# Task 5: Reactive Slipped Schedule Check
+# ---------------------------------------------------------------------------
+
+async def check_slipped_schedules(conn: asyncpg.Connection, pool: Any = None, dry_run: bool = False) -> dict:
+    """Find scheduled tasks that passed uncompleted, detect slipped downstream tasks, and log or stage re-plan."""
+    from backend.memory.structured import list_tasks, get_all_dependencies_map
+    from backend.services.scheduler import find_slipped_tasks, replan_slipped_tasks, get_available_windows
+    from backend.services.calendar import get_calendar_freebusy
+
+    tasks = await list_tasks(conn)
+    slipped = find_slipped_tasks(tasks)
+    if not slipped:
+        logger.info("  [5/5] Slipped schedule check: 0 tasks slipped past end time.")
+        return {"slipped_count": 0, "affected_count": 0, "rescheduled_count": 0}
+
+    logger.info(f"  [5/5] Found {len(slipped)} slipped task(s) past scheduled_end!")
+    dep_map = await get_all_dependencies_map(conn)
+    now = datetime.now(timezone.utc)
+    busy = await get_calendar_freebusy(now, now + timedelta(days=7), pool=pool)
+    windows = get_available_windows(busy, now, now + timedelta(days=7))
+    replan = replan_slipped_tasks(slipped, tasks, dependencies=dep_map, available_windows=windows)
+    logger.info(f"    ⚡ Reactive re-plan computed: {replan['summary']}")
+    return {
+        "slipped_count": len(slipped),
+        "slipped_task_ids": replan["slipped_task_ids"],
+        "affected_count": len(replan["affected_task_ids"]),
+        "rescheduled_count": len(replan["rescheduled"]),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Main Orchestrator
 # ---------------------------------------------------------------------------
 
@@ -379,6 +410,7 @@ async def run_consolidation(
         pruned_count = await deduplicate_vectors(conn, threshold=similarity_threshold, dry_run=dry_run)
         archived_count = await archive_stale_threads(conn, client, stale_days=stale_thread_days, dry_run=dry_run)
         proactive_res = await trigger_proactive_nightly_run(conn, client, dry_run=dry_run, pool=pool)
+        slipped_res = await check_slipped_schedules(conn, pool=pool, dry_run=dry_run)
 
         logger.info("=" * 60)
         logger.info("SUMMARY OF CONSOLIDATION:")
@@ -387,6 +419,7 @@ async def run_consolidation(
         logger.info(f"  • Stale threads archived : {archived_count}")
         if proactive_res:
             logger.info(f"  • Proactive agent run    : {proactive_res.get('status')} ({proactive_res.get('run_id')})")
+        logger.info(f"  • Slipped tasks detected : {slipped_res.get('slipped_count')}")
         logger.info("=" * 60)
 
         return {
@@ -394,6 +427,7 @@ async def run_consolidation(
             "duplicate_chunks_merged": pruned_count,
             "stale_conversations_rolled_up": archived_count,
             "proactive_nightly_run": proactive_res,
+            "slipped_schedules": slipped_res,
             # Backwards compatibility aliases
             "overdue_tasks": overdue_count,
             "pruned_chunks": pruned_count,

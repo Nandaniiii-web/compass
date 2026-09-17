@@ -451,6 +451,21 @@ COMMIT_SCHEDULE_TOOL: Dict[str, Any] = {
     },
 }
 
+DETECT_SCHEDULE_CONFLICTS_TOOL: Dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": "detect_schedule_conflicts",
+        "description": "Analyze scheduled tasks, calendar events, and task dependency prerequisites to detect time overlaps, dependency timing violations, overdue/slipped tasks, and deadline breaches.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "start_date": {"type": "string", "description": "Optional start date filter (YYYY-MM-DD)"},
+                "end_date": {"type": "string", "description": "Optional end date filter (YYYY-MM-DD)"},
+            },
+        },
+    },
+}
+
 # Registered tools exposed to the Nemotron router
 BASE_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
     ADD_TASK_TOOL,
@@ -472,6 +487,7 @@ BASE_TOOL_DEFINITIONS: List[Dict[str, Any]] = [
     GET_CALENDAR_AVAILABILITY_TOOL,
     PROPOSE_SCHEDULE_TOOL,
     COMMIT_SCHEDULE_TOOL,
+    DETECT_SCHEDULE_CONFLICTS_TOOL,
 ]
 
 
@@ -1294,11 +1310,14 @@ async def handle_propose_schedule(args: Dict[str, Any], pool: Any) -> Dict[str, 
     end_dt = start_dt + timedelta(days=7)
 
     tasks: List[Dict[str, Any]] = []
+    dep_map: Dict[int, List[int]] = {}
     prefs = {"work_start_time": "09:00:00", "work_end_time": "18:00:00", "work_days": [1, 2, 3, 4, 5], "buffer_minutes": 15}
 
     if pool is not None:
         async with pool.acquire() as conn:
+            from backend.memory.structured import get_all_dependencies_map
             prefs = await get_scheduling_preferences(conn)
+            dep_map = await get_all_dependencies_map(conn)
             if task_ids:
                 all_tasks = await list_tasks(conn, domain=domain)
                 id_set = set(task_ids)
@@ -1323,6 +1342,7 @@ async def handle_propose_schedule(args: Dict[str, Any], pool: Any) -> Dict[str, 
         tasks,
         free_windows,
         buffer_minutes=prefs.get("buffer_minutes", 15),
+        dependencies=dep_map,
     )
 
     scheduled_list = allocation["scheduled"]
@@ -1420,5 +1440,73 @@ async def handle_commit_schedule(args: Dict[str, Any], pool: Any) -> Dict[str, A
             "rationale": rationale,
         },
     }
+
+
+@register_skill("detect_schedule_conflicts")
+async def handle_detect_schedule_conflicts(args: Dict[str, Any], pool: Any) -> Dict[str, Any]:
+    """Analyze scheduled tasks, calendar events, and dependencies for timing conflicts and violations."""
+    from datetime import datetime, date, timedelta, timezone
+    from backend.memory.structured import list_tasks, get_all_dependencies_map
+    from backend.services.calendar import get_calendar_freebusy
+    from backend.services.scheduler import detect_schedule_conflicts
+
+    start_date = args.get("start_date")
+    end_date = args.get("end_date")
+    now = datetime.now(timezone.utc)
+
+    if start_date:
+        try:
+            s_dt = datetime.combine(date.fromisoformat(start_date[:10]), datetime.min.time(), tzinfo=timezone.utc)
+        except Exception:
+            s_dt = now
+    else:
+        s_dt = now
+
+    if end_date:
+        try:
+            e_dt = datetime.combine(date.fromisoformat(end_date[:10]), datetime.max.time(), tzinfo=timezone.utc)
+        except Exception:
+            e_dt = s_dt + timedelta(days=14)
+    else:
+        e_dt = s_dt + timedelta(days=14)
+
+    tasks: List[Dict[str, Any]] = []
+    dep_map: Dict[int, List[int]] = {}
+    if pool is not None:
+        async with pool.acquire() as conn:
+            tasks = await list_tasks(conn)
+            dep_map = await get_all_dependencies_map(conn)
+
+    # External busy intervals
+    ext_events: List[Dict[str, Any]] = []
+    if pool is not None:
+        all_busy = await get_calendar_freebusy(s_dt, e_dt, pool=pool)
+        ext_events = [b for b in all_busy if b.get("source") != "compass_task"]
+
+    conflicts = detect_schedule_conflicts(
+        scheduled_tasks=tasks,
+        external_events=ext_events,
+        dependencies=dep_map,
+        current_time=now,
+    )
+
+    if conflicts:
+        lines = [f"⚠️ Detected {len(conflicts)} schedule conflict(s) or constraint violation(s):"]
+        for c in conflicts:
+            lines.append(f"  • [{c['conflict_type'].upper()}] {c.get('issue', c)}")
+        resp_text = "\n".join(lines)
+    else:
+        resp_text = "✅ No schedule conflicts, dependency timing violations, or slipped deadlines detected."
+
+    return {
+        "response": resp_text,
+        "data": {
+            "conflicts": conflicts,
+            "conflict_count": len(conflicts),
+            "scanned_tasks_count": len(tasks),
+            "scanned_external_events_count": len(ext_events),
+        },
+    }
+
 
 

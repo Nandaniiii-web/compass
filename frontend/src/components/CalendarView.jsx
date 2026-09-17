@@ -4,7 +4,10 @@ import {
   fetchCalendarAvailability,
   proposeSchedule,
   commitSchedule,
-  getCalendarExportUrl
+  getCalendarExportUrl,
+  getGoogleOAuthConnectUrl,
+  disconnectCalendar,
+  checkReactiveSchedule,
 } from '../api/client'
 
 const DOMAIN_STYLES = {
@@ -41,7 +44,7 @@ const DOMAIN_STYLES = {
 const HOURS = [8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
 
 export default function CalendarView({ tasks, activeDomain, onTasksUpdated }) {
-  const [calendarStatus, setCalendarStatus] = useState({ connected: true, account_email: 'demo-scholar@compass.ai' })
+  const [calendarStatus, setCalendarStatus] = useState({ connected: false, mode: 'demo', account_email: 'demo-scholar@compass.ai' })
   const [selectedDate, setSelectedDate] = useState(() => {
     const d = new Date()
     return d.toISOString().split('T')[0]
@@ -52,13 +55,24 @@ export default function CalendarView({ tasks, activeDomain, onTasksUpdated }) {
   const [committing, setCommitting] = useState(false)
   const [proposedPlan, setProposedPlan] = useState(null)
   const [bannerMessage, setBannerMessage] = useState(null)
+  const [checkingReactive, setCheckingReactive] = useState(false)
 
-  // Sync calendar connection status
+  // Sync calendar connection status & check URL callback
   useEffect(() => {
+    const urlParams = new URLSearchParams(window.location.search)
+    if (urlParams.get('calendar_connected') === 'true') {
+      setBannerMessage({
+        type: 'success',
+        text: '✅ Google Calendar successfully connected via OAuth! Live availability enabled.'
+      })
+      window.history.replaceState({}, document.title, window.location.pathname)
+    }
+
     fetchCalendarStatus().then(status => {
       if (status) setCalendarStatus(status)
     })
   }, [])
+
 
   // Fetch free/busy intervals for selected date
   const loadAvailability = useCallback(async (dateStr) => {
@@ -169,6 +183,32 @@ export default function CalendarView({ tasks, activeDomain, onTasksUpdated }) {
     }
   }
 
+  const handleCheckReactive = async () => {
+    setCheckingReactive(true)
+    try {
+      const res = await checkReactiveSchedule()
+      if (res.slipped_count > 0) {
+        setBannerMessage({
+          type: 'warning',
+          text: `⚠️ Detected ${res.slipped_count} slipped task(s) past scheduled end time! Reactive re-plan staged with cascading dependencies (Run ID: ${res.run_id || 'staged'}).`
+        })
+        if (onTasksUpdated) onTasksUpdated()
+      } else {
+        setBannerMessage({
+          type: 'success',
+          text: '✅ Schedule is currently on track — no uncompleted tasks have slipped past their end time.'
+        })
+      }
+    } catch (e) {
+      setBannerMessage({
+        type: 'error',
+        text: `Error checking schedule slips: ${e.message}`
+      })
+    } finally {
+      setCheckingReactive(false)
+    }
+  }
+
   // Generate 7 days for the date selector
   const dayTabs = []
   const today = new Date()
@@ -202,25 +242,78 @@ export default function CalendarView({ tasks, activeDomain, onTasksUpdated }) {
               display: 'flex',
               alignItems: 'center',
               gap: '6px',
-              padding: '3px 9px',
+              padding: '4px 10px',
               borderRadius: '12px',
-              background: 'rgba(16, 185, 129, 0.1)',
-              border: '1px solid rgba(16, 185, 129, 0.3)',
+              background: calendarStatus.connected && calendarStatus.mode === 'live' ? 'rgba(16, 185, 129, 0.1)' : 'rgba(245, 158, 11, 0.1)',
+              border: calendarStatus.connected && calendarStatus.mode === 'live' ? '1px solid rgba(16, 185, 129, 0.3)' : '1px solid rgba(245, 158, 11, 0.3)',
               fontSize: '11px',
-              color: '#34d399',
+              color: calendarStatus.connected && calendarStatus.mode === 'live' ? '#34d399' : '#fbbf24',
               fontWeight: '500'
             }}>
-              <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: '#10b981' }} />
-              Google Calendar: {calendarStatus.account_email || 'demo-scholar@compass.ai'} (Synced)
+              <span style={{
+                width: '6px',
+                height: '6px',
+                borderRadius: '50%',
+                background: calendarStatus.connected && calendarStatus.mode === 'live' ? '#10b981' : '#f59e0b'
+              }} />
+              {calendarStatus.connected && calendarStatus.mode === 'live'
+                ? `Google Calendar: ${calendarStatus.account_email} (Live OAuth Connected)`
+                : `Google Calendar: ${calendarStatus.account_email || 'demo-scholar@compass.ai'} (simulated / demo mode — live OAuth not yet connected)`}
             </div>
           </div>
           <p style={{ fontSize: '12px', color: '#64748b', marginTop: '2px' }}>
             Deterministic Python interval slot allocator · Working hours (09:00–18:00) · 15m inter-task buffer
+            {calendarStatus.mode === 'demo' && ' · Simulated calendar commitments (live OAuth available)'}
           </p>
         </div>
 
         {/* Action Controls */}
-        <div style={{ display: 'flex', gap: '10px' }}>
+        <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+          {calendarStatus.connected && calendarStatus.mode === 'live' ? (
+            <button
+              id="btn-disconnect-google"
+              onClick={async () => {
+                await disconnectCalendar()
+                setCalendarStatus({ connected: false, mode: 'demo', account_email: 'demo-scholar@compass.ai' })
+                loadAvailability(selectedDate)
+              }}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px',
+                padding: '7px 12px',
+                borderRadius: '8px',
+                background: '#1e293b',
+                border: '1px solid #334155',
+                color: '#94a3b8',
+                fontSize: '12px',
+                cursor: 'pointer'
+              }}>
+              Disconnect
+            </button>
+          ) : (
+            <a
+              id="btn-connect-google"
+              href={getGoogleOAuthConnectUrl()}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px',
+                padding: '7px 12px',
+                borderRadius: '8px',
+                background: 'rgba(59, 130, 246, 0.12)',
+                border: '1px solid rgba(59, 130, 246, 0.35)',
+                color: '#60a5fa',
+                fontSize: '12px',
+                fontWeight: '500',
+                textDecoration: 'none',
+                cursor: 'pointer',
+                transition: 'all 0.15s ease'
+              }}>
+              🔗 Connect Google Account
+            </a>
+          )}
+
           <a
             id="btn-export-ics"
             href={getCalendarExportUrl(activeDomain)}
@@ -229,12 +322,12 @@ export default function CalendarView({ tasks, activeDomain, onTasksUpdated }) {
               display: 'flex',
               alignItems: 'center',
               gap: '6px',
-              padding: '8px 14px',
+              padding: '7px 12px',
               borderRadius: '8px',
               background: '#1e293b',
               border: '1px solid #334155',
               color: '#cbd5e1',
-              fontSize: '12.5px',
+              fontSize: '12px',
               fontWeight: '500',
               textDecoration: 'none',
               cursor: 'pointer',
@@ -244,6 +337,27 @@ export default function CalendarView({ tasks, activeDomain, onTasksUpdated }) {
           </a>
 
           <button
+            id="btn-check-slipped"
+            onClick={handleCheckReactive}
+            disabled={checkingReactive}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              padding: '7px 12px',
+              borderRadius: '8px',
+              background: 'rgba(245, 158, 11, 0.12)',
+              border: '1px solid rgba(245, 158, 11, 0.35)',
+              color: '#fbbf24',
+              fontSize: '12px',
+              fontWeight: '500',
+              cursor: checkingReactive ? 'wait' : 'pointer',
+              transition: 'all 0.15s ease'
+            }}>
+            {checkingReactive ? '🔄 Scanning...' : '⚡ Scan Schedule Slip'}
+          </button>
+
+          <button
             id="btn-auto-schedule"
             onClick={handleAutoSchedule}
             disabled={proposing}
@@ -251,7 +365,7 @@ export default function CalendarView({ tasks, activeDomain, onTasksUpdated }) {
               display: 'flex',
               alignItems: 'center',
               gap: '6px',
-              padding: '8px 16px',
+              padding: '7px 14px',
               borderRadius: '8px',
               background: 'linear-gradient(135deg, #6366f1, #8b5cf6)',
               border: 'none',

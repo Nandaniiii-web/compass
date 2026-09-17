@@ -98,6 +98,17 @@ async def _ensure_tables(pool: asyncpg.Pool) -> None:
             buffer_minutes     INTEGER       NOT NULL DEFAULT 15,
             preferred_focus    TEXT          NOT NULL DEFAULT 'morning'
         );
+
+        CREATE TABLE IF NOT EXISTS task_dependencies (
+            id                 SERIAL        PRIMARY KEY,
+            task_id            INTEGER       NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+            depends_on_task_id INTEGER       NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+            created_at         TIMESTAMPTZ   NOT NULL DEFAULT now(),
+            UNIQUE(task_id, depends_on_task_id),
+            CHECK(task_id != depends_on_task_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_task_dep_task_id ON task_dependencies(task_id);
+        CREATE INDEX IF NOT EXISTS idx_task_dep_depends_on ON task_dependencies(depends_on_task_id);
         """)
 
 

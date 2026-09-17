@@ -263,13 +263,27 @@ export async function streamQueryFromAssistant(prompt, conversationId, { onToken
 export async function fetchCalendarStatus() {
   try {
     const res = await fetch(`${API_BASE}/api/calendar/status`)
-    if (!res.ok) return { connected: false, mode: 'offline' }
+    if (!res.ok) return { connected: false, mode: 'demo', account_email: 'demo-scholar@compass.ai', is_simulated: true }
     const data = await res.json()
-    return data.calendar || { connected: false }
+    return data.calendar || { connected: false, mode: 'demo', is_simulated: true }
   } catch {
-    return { connected: true, mode: 'demo', account_email: 'demo-scholar@compass.ai' }
+    return { connected: false, mode: 'demo', account_email: 'demo-scholar@compass.ai', is_simulated: true }
   }
 }
+
+export function getGoogleOAuthConnectUrl() {
+  return `${API_BASE}/api/calendar/connect`
+}
+
+export async function disconnectCalendar() {
+  try {
+    const res = await fetch(`${API_BASE}/api/calendar/disconnect`, { method: 'POST' })
+    return await res.json()
+  } catch {
+    return { status: 'ok' }
+  }
+}
+
 
 export async function fetchCalendarAvailability(startDate, endDate) {
   try {
@@ -338,4 +352,22 @@ export function getCalendarExportUrl(domain) {
   }
   return `${API_BASE}/api/calendar/export.ics`
 }
+
+export async function checkReactiveSchedule(currentTime = null) {
+  const body = currentTime ? { current_time: currentTime } : {}
+  const res = await fetch(`${API_BASE}/api/schedule/reactive-check`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  return await res.json()
+}
+
+export async function fetchScheduleConflicts() {
+  const res = await fetch(`${API_BASE}/api/schedule/conflicts`)
+  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  return await res.json()
+}
+
 

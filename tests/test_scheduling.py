@@ -245,7 +245,9 @@ async def test_calendar_status_endpoint(client: AsyncClient):
     data = resp.json()
     assert data["status"] == "ok"
     assert "calendar" in data
-    assert data["calendar"]["connected"] is True
+    assert "connected" in data["calendar"]
+    assert data["calendar"]["mode"] in ("live", "demo")
+    assert "label" in data["calendar"]
 
 
 @pytest.mark.asyncio

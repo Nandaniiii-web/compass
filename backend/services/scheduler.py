@@ -193,16 +193,20 @@ def allocate_task_slots(
     available_windows: Sequence[TimeWindow],
     buffer_minutes: int = 15,
     strategy: str = "priority_first",
+    dependencies: Optional[Dict[int, Sequence[int]]] = None,
+    existing_scheduled_map: Optional[Dict[int, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Deterministically allocate tasks into available time windows.
 
     Tasks are prioritized by:
-      1. Priority weight (urgent > high > medium > low)
-      2. Due date (earlier deadlines first)
-      3. Duration (fitting tasks efficiently)
+      1. Topological dependency prerequisites (parents must finish before children start)
+      2. Priority weight (urgent > high > medium > low)
+      3. Due date (earlier deadlines first)
+      4. Duration (fitting tasks efficiently)
 
     Ensures:
       - No overlapping allocations.
+      - Each task is placed after all prerequisite tasks have completed + buffer.
       - Each task is placed within its deadline (`scheduled_end <= due_date 23:59:59 UTC`).
       - Preserves `buffer_minutes` between consecutive scheduled slots.
       - Returns both scheduled slots and any unassigned tasks with rationale.
@@ -215,7 +219,26 @@ def allocate_task_slots(
             "summary": "No tasks provided for scheduling.",
         }
 
-    # Sort tasks according to scheduling strategy
+    # Normalize dependencies map
+    dep_map: Dict[int, List[int]] = {}
+    if dependencies:
+        for k, v in dependencies.items():
+            dep_map[int(k)] = [int(x) for x in v]
+    for t in tasks:
+        tid = t.get("id")
+        if tid is not None and t.get("depends_on"):
+            dep_map.setdefault(int(tid), []).extend([int(x) for x in t["depends_on"]])
+
+    # Map of already scheduled tasks (from previous state or prior batches)
+    scheduled_map: Dict[int, Dict[str, Any]] = {}
+    if existing_scheduled_map:
+        for k, v in existing_scheduled_map.items():
+            scheduled_map[int(k)] = {
+                "scheduled_start": _ensure_utc(v["scheduled_start"]),
+                "scheduled_end": _ensure_utc(v["scheduled_end"]),
+            }
+
+    # Sort key for tasks that are ready
     def sort_key(t: Dict[str, Any]) -> Tuple[int, datetime, int]:
         prio = str(t.get("priority", "medium")).lower()
         prio_rank = -PRIORITY_WEIGHTS.get(prio, 2)  # Higher priority comes first
@@ -232,8 +255,7 @@ def allocate_task_slots(
         duration = int(t.get("duration_minutes") or 60)
         return (prio_rank, due_dt, duration)
 
-    sorted_tasks = sorted(tasks, key=sort_key)
-
+    remaining_tasks = list(tasks)
     # Make mutable list of free windows: list of [start, end]
     free_blocks: List[List[datetime]] = [[w.start, w.end] for w in available_windows]
 
@@ -243,7 +265,32 @@ def allocate_task_slots(
 
     buf_delta = timedelta(minutes=buffer_minutes)
 
-    for task in sorted_tasks:
+    while remaining_tasks:
+        # Find all ready tasks (all prerequisites in scheduled_map)
+        ready_tasks = []
+        for t in remaining_tasks:
+            tid = t.get("id")
+            prereqs = dep_map.get(int(tid), []) if tid is not None else []
+            if all(p in scheduled_map for p in prereqs):
+                ready_tasks.append(t)
+
+        if not ready_tasks:
+            # Deadlock or unfulfilled prerequisite among remaining tasks
+            for t in remaining_tasks:
+                unassigned.append({
+                    "task_id": t.get("id"),
+                    "title": t.get("title"),
+                    "priority": t.get("priority", "medium"),
+                    "duration_minutes": int(t.get("duration_minutes") or 60),
+                    "due_date": str(t.get("due_date")) if t.get("due_date") else None,
+                    "reason": "Prerequisite dependencies not satisfied or could not be scheduled.",
+                })
+            break
+
+        # Pick the highest priority ready task
+        task = min(ready_tasks, key=sort_key)
+        remaining_tasks.remove(task)
+
         duration_min = int(task.get("duration_minutes") or 60)
         needed_delta = timedelta(minutes=duration_min)
 
@@ -259,18 +306,25 @@ def allocate_task_slots(
             elif isinstance(raw_due, datetime):
                 due_limit = _ensure_utc(raw_due)
 
+        # Determine earliest allowed start based on prerequisites
+        tid = task.get("id")
+        prereqs = dep_map.get(int(tid), []) if tid is not None else []
+        if prereqs:
+            earliest_allowed_start = max(scheduled_map[p]["scheduled_end"] + buf_delta for p in prereqs)
+        else:
+            earliest_allowed_start = datetime.min.replace(tzinfo=timezone.utc)
+
         placed = False
         for i, block in enumerate(free_blocks):
             b_start, b_end = block[0], block[1]
-            if (b_end - b_start) < needed_delta:
-                continue
-
-            slot_start = b_start
+            slot_start = max(b_start, earliest_allowed_start)
             slot_end = slot_start + needed_delta
 
-            # Check if this placement violates due date
+            if slot_end > b_end:
+                continue
+
+            # Check if placement violates due date
             if due_limit and slot_end > due_limit:
-                # Cannot place here or anywhere later for this task
                 conflicts.append({
                     "task_id": task.get("id"),
                     "title": task.get("title"),
@@ -291,17 +345,26 @@ def allocate_task_slots(
                 "scheduled_end": slot_end.isoformat(),
             })
 
-            # Consume the slot + buffer from this free block
-            new_start = slot_end + buf_delta
-            if new_start < b_end:
-                free_blocks[i] = [new_start, b_end]
-            else:
-                free_blocks.pop(i)
+            if tid is not None:
+                scheduled_map[int(tid)] = {
+                    "scheduled_start": slot_start,
+                    "scheduled_end": slot_end,
+                }
 
+            # Update free blocks: split before and after
+            new_pieces: List[List[datetime]] = []
+            if slot_start > b_start and (slot_start - b_start).total_seconds() >= max(15, buffer_minutes) * 60:
+                new_pieces.append([b_start, slot_start])
+
+            after_start = slot_end + buf_delta
+            if after_start < b_end and (b_end - after_start).total_seconds() >= max(15, buffer_minutes) * 60:
+                new_pieces.append([after_start, b_end])
+
+            free_blocks[i:i + 1] = new_pieces
             placed = True
             break
 
-        if not placed:
+        if not placed and not any(c.get("task_id") == task.get("id") for c in conflicts):
             unassigned.append({
                 "task_id": task.get("id"),
                 "title": task.get("title"),
@@ -324,25 +387,163 @@ def allocate_task_slots(
     }
 
 
+def find_slipped_tasks(
+    tasks: Sequence[Dict[str, Any]],
+    current_time: Optional[datetime | str] = None,
+) -> List[Dict[str, Any]]:
+    """Detect tasks that were scheduled to end before current_time but are not marked 'done'."""
+    now_utc = _ensure_utc(current_time) if current_time else datetime.now(timezone.utc)
+    slipped: List[Dict[str, Any]] = []
+
+    for t in tasks:
+        status = str(t.get("status", "open")).lower().strip()
+        if status in ("done", "completed", "closed"):
+            continue
+
+        sched_end = t.get("scheduled_end")
+        if not sched_end:
+            continue
+
+        end_utc = _ensure_utc(sched_end)
+        if end_utc < now_utc:
+            slipped.append({
+                **dict(t),
+                "scheduled_end_utc": end_utc.isoformat(),
+                "slip_minutes": max(0, int((now_utc - end_utc).total_seconds() // 60)),
+            })
+
+    return slipped
+
+
+def replan_slipped_tasks(
+    slipped_tasks: Sequence[Dict[str, Any]],
+    all_tasks: Sequence[Dict[str, Any]],
+    dependencies: Optional[Dict[int, Sequence[int]]] = None,
+    available_windows: Sequence[TimeWindow] = (),
+    buffer_minutes: int = 15,
+) -> Dict[str, Any]:
+    """Re-scope and replan slipped tasks and all downstream dependents.
+
+    Preserves all unaffected tasks untouched.
+    """
+    if not slipped_tasks:
+        return {
+            "slipped_task_ids": [],
+            "affected_task_ids": [],
+            "rescheduled": [],
+            "unassigned": [],
+            "conflicts": [],
+            "summary": "No slipped tasks to replan.",
+        }
+
+    dep_map: Dict[int, List[int]] = {}
+    if dependencies:
+        for k, v in dependencies.items():
+            dep_map[int(k)] = [int(x) for x in v]
+
+    for t in all_tasks:
+        tid = t.get("id")
+        if tid is not None and t.get("depends_on"):
+            dep_map.setdefault(int(tid), []).extend([int(x) for x in t["depends_on"]])
+
+    # Build downstream map: parent -> list of children
+    downstream_map: Dict[int, List[int]] = {}
+    for child, parents in dep_map.items():
+        for parent in parents:
+            downstream_map.setdefault(parent, []).append(child)
+
+    slipped_ids = {int(t["id"]) for t in slipped_tasks if t.get("id") is not None}
+    affected_ids = set(slipped_ids)
+    queue = list(slipped_ids)
+    while queue:
+        curr = queue.pop(0)
+        for child_id in downstream_map.get(curr, []):
+            if child_id not in affected_ids:
+                affected_ids.add(child_id)
+                queue.append(child_id)
+
+    task_by_id = {int(t["id"]): t for t in all_tasks if t.get("id") is not None}
+    for st in slipped_tasks:
+        if st.get("id") is not None:
+            task_by_id[int(st["id"])] = st
+
+    tasks_to_replan = [task_by_id[tid] for tid in affected_ids if tid in task_by_id]
+
+    # Preserved tasks that remain scheduled and fixed in place
+    existing_scheduled: Dict[int, Dict[str, Any]] = {}
+    for t in all_tasks:
+        tid = t.get("id")
+        if tid is not None and int(tid) not in affected_ids and t.get("scheduled_start") and t.get("scheduled_end"):
+            existing_scheduled[int(tid)] = {
+                "scheduled_start": _ensure_utc(t["scheduled_start"]),
+                "scheduled_end": _ensure_utc(t["scheduled_end"]),
+            }
+
+    allocation = allocate_task_slots(
+        tasks=tasks_to_replan,
+        available_windows=available_windows,
+        buffer_minutes=buffer_minutes,
+        dependencies=dep_map,
+        existing_scheduled_map=existing_scheduled,
+    )
+
+    downstream_count = max(0, len(affected_ids) - len(slipped_ids))
+    return {
+        "slipped_task_ids": sorted(list(slipped_ids)),
+        "affected_task_ids": sorted(list(affected_ids)),
+        "rescheduled": allocation["scheduled"],
+        "unassigned": allocation["unassigned"],
+        "conflicts": allocation["conflicts"],
+        "summary": f"Replanned {len(allocation['scheduled'])} tasks ({len(slipped_ids)} slipped, {downstream_count} downstream dependents).",
+    }
+
+
 def detect_schedule_conflicts(
     scheduled_tasks: Sequence[Dict[str, Any]],
     external_events: Optional[Sequence[Dict[str, Any]]] = None,
+    dependencies: Optional[Dict[int, Sequence[int]]] = None,
+    current_time: Optional[datetime | str] = None,
+    buffer_minutes: int = 15,
 ) -> List[Dict[str, Any]]:
-    """Scan scheduled tasks and external calendar events for overlaps or deadline violations."""
+    """Scan scheduled tasks, dependencies, and external events for:
+    1. Direct time overlaps (task-to-task or task-to-external).
+    2. Dependency order/timing violations (task starts before prerequisite finishes + buffer).
+    3. Deadline violations (task scheduled after due_date).
+    4. Slipped deadlines (uncompleted task scheduled in the past).
+    """
     conflicts: List[Dict[str, Any]] = []
+    buf_delta = timedelta(minutes=buffer_minutes)
+    now_utc = _ensure_utc(current_time) if current_time else datetime.now(timezone.utc)
 
-    # Check internal overlaps
+    task_map: Dict[int, Dict[str, Any]] = {}
+    for st in scheduled_tasks:
+        tid = st.get("id") or st.get("task_id")
+        if tid is not None:
+            task_map[int(tid)] = st
+
+    dep_map: Dict[int, List[int]] = {}
+    if dependencies:
+        for k, v in dependencies.items():
+            dep_map[int(k)] = [int(x) for x in v]
+    for st in scheduled_tasks:
+        tid = st.get("id") or st.get("task_id")
+        if tid is not None and st.get("depends_on"):
+            dep_map.setdefault(int(tid), []).extend([int(x) for x in st["depends_on"]])
+
+    # 1. Overlap detection
     items: List[Tuple[datetime, datetime, Dict[str, Any], str]] = []
     for st in scheduled_tasks:
-        start = _ensure_utc(st["scheduled_start"])
-        end = _ensure_utc(st["scheduled_end"])
-        items.append((start, end, st, "task"))
+        if st.get("scheduled_start") and st.get("scheduled_end"):
+            start = _ensure_utc(st["scheduled_start"])
+            end = _ensure_utc(st["scheduled_end"])
+            items.append((start, end, st, "task"))
 
     if external_events:
         for ev in external_events:
-            start = _ensure_utc(ev.get("start") or ev.get("scheduled_start"))
-            end = _ensure_utc(ev.get("end") or ev.get("scheduled_end"))
-            items.append((start, end, ev, "external"))
+            if (ev.get("start") or ev.get("scheduled_start")) and (ev.get("end") or ev.get("scheduled_end")):
+                start = _ensure_utc(ev.get("start") or ev.get("scheduled_start"))
+                end = _ensure_utc(ev.get("end") or ev.get("scheduled_end"))
+                items.append((start, end, ev, "external"))
 
     items.sort(key=lambda x: x[0])
 
@@ -360,4 +561,76 @@ def detect_schedule_conflicts(
             else:
                 break
 
+    # 2. Dependency timing violations
+    for child_id, prereq_ids in dep_map.items():
+        child = task_map.get(child_id)
+        if not child or not child.get("scheduled_start"):
+            continue
+        child_start = _ensure_utc(child["scheduled_start"])
+
+        for pid in prereq_ids:
+            parent = task_map.get(pid)
+            if not parent:
+                continue
+            if not parent.get("scheduled_end"):
+                conflicts.append({
+                    "conflict_type": "dependency_violation",
+                    "task_id": child_id,
+                    "task_title": child.get("title"),
+                    "prerequisite_id": pid,
+                    "prerequisite_title": parent.get("title"),
+                    "issue": f"Task '{child.get('title')}' is scheduled, but prerequisite '{parent.get('title')}' has no scheduled time.",
+                })
+                continue
+
+            parent_end = _ensure_utc(parent["scheduled_end"])
+            if child_start < (parent_end + buf_delta):
+                conflicts.append({
+                    "conflict_type": "dependency_violation",
+                    "task_id": child_id,
+                    "task_title": child.get("title"),
+                    "prerequisite_id": pid,
+                    "prerequisite_title": parent.get("title"),
+                    "issue": f"Task '{child.get('title')}' starts at {child_start.isoformat()} before prerequisite '{parent.get('title')}' completes with buffer at {(parent_end + buf_delta).isoformat()}.",
+                })
+
+    # 3. Deadline violations
+    for st in scheduled_tasks:
+        if st.get("due_date") and st.get("scheduled_end"):
+            sched_end = _ensure_utc(st["scheduled_end"])
+            raw_due = st["due_date"]
+            if isinstance(raw_due, str):
+                d_obj = date.fromisoformat(raw_due[:10])
+                due_limit = datetime.combine(d_obj, time(23, 59, 59), tzinfo=timezone.utc)
+            elif isinstance(raw_due, date) and not isinstance(raw_due, datetime):
+                due_limit = datetime.combine(raw_due, time(23, 59, 59), tzinfo=timezone.utc)
+            else:
+                due_limit = _ensure_utc(raw_due)
+
+            if sched_end > due_limit:
+                conflicts.append({
+                    "conflict_type": "deadline_exceeded",
+                    "task_id": st.get("id") or st.get("task_id"),
+                    "title": st.get("title"),
+                    "due_date": str(st["due_date"]),
+                    "scheduled_end": sched_end.isoformat(),
+                    "issue": f"Task '{st.get('title')}' finishes after its due date ({st.get('due_date')}).",
+                })
+
+    # 4. Slipped uncompleted tasks
+    for st in scheduled_tasks:
+        status = str(st.get("status", "open")).lower().strip()
+        if status not in ("done", "completed", "closed") and st.get("scheduled_end"):
+            sched_end = _ensure_utc(st["scheduled_end"])
+            if sched_end < now_utc:
+                conflicts.append({
+                    "conflict_type": "slipped_deadline",
+                    "task_id": st.get("id") or st.get("task_id"),
+                    "title": st.get("title"),
+                    "scheduled_end": sched_end.isoformat(),
+                    "slip_minutes": int((now_utc - sched_end).total_seconds() // 60),
+                    "issue": f"Task '{st.get('title')}' scheduled end was in the past ({sched_end.isoformat()}) but task remains {status}.",
+                })
+
     return conflicts
+
