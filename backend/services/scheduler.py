@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 import logging
 
 logger = logging.getLogger("compass.scheduler")
@@ -193,7 +193,7 @@ def allocate_task_slots(
     available_windows: Sequence[TimeWindow],
     buffer_minutes: int = 15,
     strategy: str = "priority_first",
-    dependencies: Optional[Dict[int, Sequence[int]]] = None,
+    dependencies: Optional[Mapping[int, Sequence[int]]] = None,
     existing_scheduled_map: Optional[Dict[int, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Deterministically allocate tasks into available time windows.
@@ -418,7 +418,7 @@ def find_slipped_tasks(
 def replan_slipped_tasks(
     slipped_tasks: Sequence[Dict[str, Any]],
     all_tasks: Sequence[Dict[str, Any]],
-    dependencies: Optional[Dict[int, Sequence[int]]] = None,
+    dependencies: Optional[Mapping[int, Sequence[int]]] = None,
     available_windows: Sequence[TimeWindow] = (),
     buffer_minutes: int = 15,
 ) -> Dict[str, Any]:
@@ -501,7 +501,7 @@ def replan_slipped_tasks(
 def detect_schedule_conflicts(
     scheduled_tasks: Sequence[Dict[str, Any]],
     external_events: Optional[Sequence[Dict[str, Any]]] = None,
-    dependencies: Optional[Dict[int, Sequence[int]]] = None,
+    dependencies: Optional[Mapping[int, Sequence[int]]] = None,
     current_time: Optional[datetime | str] = None,
     buffer_minutes: int = 15,
 ) -> List[Dict[str, Any]]:
