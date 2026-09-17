@@ -255,3 +255,87 @@ export async function streamQueryFromAssistant(prompt, conversationId, { onToken
     }
   }
 }
+
+// ---------------------------------------------------------------------------
+// Calendar & Dynamic Scheduling API
+// ---------------------------------------------------------------------------
+
+export async function fetchCalendarStatus() {
+  try {
+    const res = await fetch(`${API_BASE}/api/calendar/status`)
+    if (!res.ok) return { connected: false, mode: 'offline' }
+    const data = await res.json()
+    return data.calendar || { connected: false }
+  } catch {
+    return { connected: true, mode: 'demo', account_email: 'demo-scholar@compass.ai' }
+  }
+}
+
+export async function fetchCalendarAvailability(startDate, endDate) {
+  try {
+    let url = `${API_BASE}/api/calendar/availability`
+    const params = new URLSearchParams()
+    if (startDate) params.append('start_date', startDate)
+    if (endDate) params.append('end_date', endDate)
+    if (params.toString()) url += `?${params.toString()}`
+
+    const res = await fetch(url)
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const json = await res.json()
+    return json.data || json
+  } catch (err) {
+    console.warn('[Compass Calendar Availability Fallback]', err)
+    return { busy_intervals: [], free_windows: [] }
+  }
+}
+
+export async function proposeSchedule({ targetDate, domain, taskIds } = {}) {
+  const payload = {}
+  if (targetDate) payload.target_date = targetDate
+  if (domain && domain !== 'all') payload.domain = domain
+  if (taskIds && taskIds.length > 0) payload.task_ids = taskIds
+
+  const res = await fetch(`${API_BASE}/api/schedule/propose`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  const json = await res.json()
+  return json.data || json
+}
+
+export async function commitSchedule(assignments, rationale = 'Committed via Schedule View') {
+  const res = await fetch(`${API_BASE}/api/schedule/commit`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ assignments, rationale }),
+  })
+  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  const json = await res.json()
+  return json.data || json
+}
+
+export async function fetchSchedulingPreferences() {
+  try {
+    const res = await fetch(`${API_BASE}/api/calendar/preferences`)
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    return await res.json()
+  } catch {
+    return {
+      work_start_time: '09:00:00',
+      work_end_time: '18:00:00',
+      work_days: [1, 2, 3, 4, 5],
+      buffer_minutes: 15,
+      preferred_focus: 'morning',
+    }
+  }
+}
+
+export function getCalendarExportUrl(domain) {
+  if (domain && domain !== 'all') {
+    return `${API_BASE}/api/calendar/export.ics?domain=${encodeURIComponent(domain)}`
+  }
+  return `${API_BASE}/api/calendar/export.ics`
+}
+

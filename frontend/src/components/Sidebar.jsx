@@ -124,9 +124,28 @@ export default function Sidebar({
             cursor: 'pointer',
             fontWeight: '500',
             fontSize: '12.5px',
+            marginBottom: '4px',
             transition: 'background 0.15s ease'
           }}>
           🧠 Agent Planner
+        </button>
+        <button
+          id="sidebar-tab-calendar"
+          onClick={() => onSelectTab('calendar')}
+          style={{
+            width: '100%',
+            textAlign: 'left',
+            padding: '8px 12px',
+            borderRadius: '6px',
+            border: 'none',
+            background: activeTab === 'calendar' ? '#1e293b' : 'transparent',
+            color: activeTab === 'calendar' ? '#fff' : '#94a3b8',
+            cursor: 'pointer',
+            fontWeight: '500',
+            fontSize: '12.5px',
+            transition: 'background 0.15s ease'
+          }}>
+          🗓️ Schedule & Calendar
         </button>
       </div>
 

@@ -27,7 +27,7 @@ except ImportError:
 
 from fastapi import FastAPI, Depends, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse, StreamingResponse
+from fastapi.responses import RedirectResponse, StreamingResponse, Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 
@@ -679,6 +679,12 @@ class FrontendTaskOut(BaseModel):
     tags: list[str] = []
     vector_dim: int = 768
     timestamp: str = "Recently"
+    priority: str = "medium"
+    status: str = "open"
+    duration_minutes: int = 60
+    scheduled_start: Optional[str] = None
+    scheduled_end: Optional[str] = None
+    is_fixed: bool = False
 
 
 def _format_countdown(due_date: Optional[date]) -> str:
@@ -722,6 +728,9 @@ async def get_frontend_tasks(domain: Optional[str] = Query(None)):
                 if t.get("priority") == "urgent":
                     tags.append("urgent")
 
+                s_start = t.get("scheduled_start")
+                s_end = t.get("scheduled_end")
+
                 result.append(
                     FrontendTaskOut(
                         id=str(t["id"]),
@@ -732,6 +741,12 @@ async def get_frontend_tasks(domain: Optional[str] = Query(None)):
                         tags=tags,
                         vector_dim=768,
                         timestamp=ts_str,
+                        priority=t.get("priority", "medium"),
+                        status=t.get("status", "open"),
+                        duration_minutes=int(t.get("duration_minutes") or 60),
+                        scheduled_start=s_start.isoformat() if hasattr(s_start, "isoformat") else (str(s_start) if s_start else None),
+                        scheduled_end=s_end.isoformat() if hasattr(s_end, "isoformat") else (str(s_end) if s_end else None),
+                        is_fixed=bool(t.get("is_fixed", False)),
                     )
                 )
             return result
@@ -1281,4 +1296,130 @@ async def trigger_nightly_consolidation_endpoint(_token: str = Depends(verify_to
     pool = await get_pool()
     result = await run_consolidation(dry_run=False, pool=pool)
     return {"status": "ok", "consolidation": result}
+
+
+# ---------------------------------------------------------------------------
+# 11. Dynamic Scheduling & Google Calendar Integration Endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/api/calendar/status")
+async def get_calendar_status_endpoint():
+    """Check connection status for Google Calendar integration."""
+    from backend.services.calendar import get_calendar_connection_status
+    pool = await get_pool()
+    status = await get_calendar_connection_status(pool=pool)
+    return {"status": "ok", "calendar": status}
+
+
+@app.get("/api/calendar/availability")
+async def get_calendar_availability_endpoint(
+    start_date: Optional[str] = Query(None, description="Start date YYYY-MM-DD"),
+    end_date: Optional[str] = Query(None, description="End date YYYY-MM-DD"),
+):
+    """Retrieve busy blocks and available working windows."""
+    from backend.skills import SKILL_REGISTRY
+    pool = await get_pool()
+    handler = SKILL_REGISTRY.get("get_calendar_availability")
+    if not handler:
+        raise HTTPException(status_code=500, detail="Availability skill not registered")
+    result = await handler({"start_date": start_date, "end_date": end_date}, pool)
+    return result
+
+
+class ProposeScheduleBody(BaseModel):
+    target_date: Optional[str] = None
+    domain: Optional[str] = None
+    task_ids: Optional[list[int]] = None
+
+
+@app.post("/api/schedule/propose")
+async def propose_schedule_endpoint(body: ProposeScheduleBody):
+    """Generate deterministic schedule proposal for tasks."""
+    from backend.skills import SKILL_REGISTRY
+    pool = await get_pool()
+    handler = SKILL_REGISTRY.get("propose_schedule")
+    if not handler:
+        raise HTTPException(status_code=500, detail="Schedule proposer skill not registered")
+    result = await handler(body.model_dump(), pool)
+    return result
+
+
+class CommitScheduleBody(BaseModel):
+    assignments: list[dict[str, Any]]
+    rationale: Optional[str] = "Committed via Compass Schedule View"
+
+
+@app.post("/api/schedule/commit")
+async def commit_schedule_endpoint(body: CommitScheduleBody):
+    """Commit approved time slots to tasks and calendar."""
+    from backend.skills import SKILL_REGISTRY
+    pool = await get_pool()
+    handler = SKILL_REGISTRY.get("commit_schedule")
+    if not handler:
+        raise HTTPException(status_code=500, detail="Schedule commit skill not registered")
+    result = await handler(body.model_dump(), pool)
+    return result
+
+
+@app.get("/api/calendar/export.ics")
+async def export_calendar_ics_endpoint(domain: Optional[str] = Query(None)):
+    """Export standard RFC 5545 iCalendar feed for calendar apps."""
+    from backend.services.calendar import generate_ics_feed
+    pool = await get_pool()
+    tasks: list[dict[str, Any]] = []
+    if pool is not None:
+        async with pool.acquire() as conn:
+            tasks = await structured.list_tasks(conn, domain=domain, scheduled_only=True)
+            # If no tasks explicitly slotted yet, pull all open tasks and generate demo schedule
+            if not tasks:
+                tasks = await structured.list_tasks(conn, domain=domain)
+
+    ics_content = generate_ics_feed(tasks, calendar_name="Compass Tasks")
+    return Response(
+        content=ics_content,
+        media_type="text/calendar",
+        headers={
+            "Content-Disposition": "attachment; filename=compass_schedule.ics",
+            "Cache-Control": "no-cache",
+        },
+    )
+
+
+@app.get("/api/calendar/preferences")
+async def get_calendar_preferences_endpoint():
+    """Retrieve working hours, days, and buffer preferences."""
+    pool = await get_pool()
+    if not pool:
+        return {
+            "user_id": "default_user",
+            "work_start_time": "09:00:00",
+            "work_end_time": "18:00:00",
+            "work_days": [1, 2, 3, 4, 5],
+            "buffer_minutes": 15,
+            "preferred_focus": "morning",
+        }
+    async with pool.acquire() as conn:
+        prefs = await structured.get_scheduling_preferences(conn)
+        return prefs
+
+
+class UpdatePreferencesBody(BaseModel):
+    work_start_time: Optional[str] = None
+    work_end_time: Optional[str] = None
+    work_days: Optional[list[int]] = None
+    buffer_minutes: Optional[int] = None
+    preferred_focus: Optional[str] = None
+
+
+@app.put("/api/calendar/preferences")
+async def update_calendar_preferences_endpoint(body: UpdatePreferencesBody):
+    """Update working hours, days, and buffer preferences."""
+    pool = await get_pool()
+    if not pool:
+        return {"status": "error", "message": "Database not available"}
+    async with pool.acquire() as conn:
+        updates = {k: v for k, v in body.model_dump().items() if v is not None}
+        prefs = await structured.update_scheduling_preferences(conn, **updates)
+        return {"status": "ok", "preferences": prefs}
+
 

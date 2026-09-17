@@ -55,6 +55,49 @@ async def _ensure_tables(pool: asyncpg.Pool) -> None:
         ALTER TABLE agent_audit_log ADD COLUMN IF NOT EXISTS is_reverted BOOLEAN NOT NULL DEFAULT FALSE;
         CREATE INDEX IF NOT EXISTS idx_agent_audit_log_run_id     ON agent_audit_log(run_id);
         CREATE INDEX IF NOT EXISTS idx_agent_audit_log_created_at ON agent_audit_log(created_at);
+
+        -- Dynamic Scheduling & Calendar Extensions
+        ALTER TABLE tasks ADD COLUMN IF NOT EXISTS duration_minutes INTEGER DEFAULT 60;
+        ALTER TABLE tasks ADD COLUMN IF NOT EXISTS scheduled_start TIMESTAMPTZ;
+        ALTER TABLE tasks ADD COLUMN IF NOT EXISTS scheduled_end TIMESTAMPTZ;
+        ALTER TABLE tasks ADD COLUMN IF NOT EXISTS is_fixed BOOLEAN NOT NULL DEFAULT FALSE;
+        ALTER TABLE tasks ADD COLUMN IF NOT EXISTS recurrence_rule TEXT;
+        CREATE INDEX IF NOT EXISTS idx_tasks_scheduled_start ON tasks(scheduled_start);
+
+        CREATE TABLE IF NOT EXISTS calendar_connections (
+            id                 SERIAL        PRIMARY KEY,
+            user_id            TEXT          NOT NULL DEFAULT 'default_user',
+            provider           TEXT          NOT NULL DEFAULT 'google',
+            account_email      TEXT,
+            refresh_token      TEXT,
+            access_token       TEXT,
+            token_expiry       TIMESTAMPTZ,
+            scopes             TEXT[]        DEFAULT '{}',
+            connected_at       TIMESTAMPTZ   NOT NULL DEFAULT now(),
+            last_synced_at     TIMESTAMPTZ,
+            sync_token         TEXT
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_calendar_conn_user_provider ON calendar_connections(user_id, provider);
+
+        CREATE TABLE IF NOT EXISTS calendar_event_links (
+            id                 SERIAL        PRIMARY KEY,
+            task_id            INTEGER       NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+            google_event_id    TEXT          NOT NULL,
+            calendar_id        TEXT          NOT NULL DEFAULT 'primary',
+            sync_status        TEXT          NOT NULL DEFAULT 'synced',
+            last_synced_at     TIMESTAMPTZ   NOT NULL DEFAULT now(),
+            UNIQUE(task_id, google_event_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS scheduling_preferences (
+            id                 SERIAL        PRIMARY KEY,
+            user_id            TEXT          NOT NULL DEFAULT 'default_user' UNIQUE,
+            work_start_time    TIME          NOT NULL DEFAULT '09:00:00',
+            work_end_time      TIME          NOT NULL DEFAULT '18:00:00',
+            work_days          INTEGER[]     NOT NULL DEFAULT '{1,2,3,4,5}',
+            buffer_minutes     INTEGER       NOT NULL DEFAULT 15,
+            preferred_focus    TEXT          NOT NULL DEFAULT 'morning'
+        );
         """)
 
 

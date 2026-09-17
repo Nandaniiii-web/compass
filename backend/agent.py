@@ -36,8 +36,8 @@ logger = logging.getLogger("compass.agent")
 # ---------------------------------------------------------------------------
 # Tools that mutate state require human confirmation before execution
 # ---------------------------------------------------------------------------
-MUTATING_TOOLS = frozenset({"add_task", "edit_task", "update_task_status", "delete_task", "log_code_snippet", "log_code_context"})
-READ_ONLY_TOOLS = frozenset({"query_tasks", "query_code_context", "query_coursework_tasks", "get_hackathon_deadlines", "summarize_day", "search_web", "list_projects", "query_coursework_notes", "chat", "summarize_across_domains"})
+MUTATING_TOOLS = frozenset({"add_task", "edit_task", "update_task_status", "delete_task", "log_code_snippet", "log_code_context", "commit_schedule"})
+READ_ONLY_TOOLS = frozenset({"query_tasks", "query_code_context", "query_coursework_tasks", "get_hackathon_deadlines", "summarize_day", "search_web", "list_projects", "query_coursework_notes", "chat", "summarize_across_domains", "detect_deadline_conflicts", "get_calendar_availability", "propose_schedule"})
 
 # In-memory registry for live SSE confirmation events: run_id -> (asyncio.Event, outcome_dict)
 _PENDING_CONFIRMATION_EVENTS: Dict[str, Tuple[asyncio.Event, Dict[str, Any]]] = {}
@@ -390,6 +390,23 @@ async def undo_last_agent_action(
         elif tool in ("log_code_snippet", "log_code_context") and affected_id:
             await conn.execute("DELETE FROM memory_chunks WHERE id = $1", affected_id)
             reverted_action["action"] = f"Deleted logged memory chunk #{affected_id}"
+
+        elif tool == "commit_schedule" and prev_state:
+            task_list = prev_state.get("tasks") or []
+            for t_item in task_list:
+                t_id = t_item.get("task_id")
+                orig_start = t_item.get("scheduled_start")
+                orig_end = t_item.get("scheduled_end")
+                if t_id:
+                    from datetime import datetime
+                    s_dt = datetime.fromisoformat(orig_start) if orig_start else None
+                    e_dt = datetime.fromisoformat(orig_end) if orig_end else None
+                    await conn.execute(
+                        "UPDATE tasks SET scheduled_start = $2, scheduled_end = $3 WHERE id = $1",
+                        t_id, s_dt, e_dt,
+                    )
+                    await conn.execute("DELETE FROM calendar_event_links WHERE task_id = $1", t_id)
+            reverted_action["action"] = f"Reverted scheduled calendar slots for {len(task_list)} task(s)"
 
         # Mark the audit log entry as reverted
         await conn.execute("UPDATE agent_audit_log SET is_reverted = TRUE WHERE id = $1", audit_id)
@@ -1216,6 +1233,23 @@ async def execute_confirmed_actions(
                                 if hasattr(v, "isoformat"):
                                     previous_state[k] = v.isoformat()
                             affected_id = int(task_id)
+            elif pool and tool_name == "commit_schedule":
+                assignments = tool_args.get("assignments") or []
+                affected_ids = [a.get("task_id") for a in assignments if a.get("task_id")]
+                if affected_ids:
+                    async with pool.acquire() as conn:
+                        rows = await conn.fetch("SELECT id, scheduled_start, scheduled_end FROM tasks WHERE id = ANY($1::int[])", affected_ids)
+                        previous_state = {
+                            "tasks": [
+                                {
+                                    "task_id": r["id"],
+                                    "scheduled_start": r["scheduled_start"].isoformat() if r["scheduled_start"] else None,
+                                    "scheduled_end": r["scheduled_end"].isoformat() if r["scheduled_end"] else None,
+                                }
+                                for r in rows
+                            ]
+                        }
+                    affected_id = affected_ids[0] if affected_ids else None
         except Exception as e:
             logger.warning(f"Failed to capture pre-mutation state: {e}")
 

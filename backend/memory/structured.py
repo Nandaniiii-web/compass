@@ -122,6 +122,11 @@ async def create_task(
     status: str = "open",
     priority: str = "medium",
     notes: Optional[str] = None,
+    duration_minutes: int = 60,
+    scheduled_start: Optional[Any] = None,
+    scheduled_end: Optional[Any] = None,
+    is_fixed: bool = False,
+    recurrence_rule: Optional[str] = None,
 ) -> dict:
     """Insert a new task into the structured tasks table with normalized inputs."""
     # Normalize domain, status, and priority to satisfy SQL CHECK constraints
@@ -136,20 +141,28 @@ async def create_task(
 
     row = await conn.fetchrow(
         """
-        INSERT INTO tasks (domain, project_id, title, due_date, status, priority, notes)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
-        RETURNING id, domain, project_id, title, due_date, status, priority, notes, created_at, updated_at
+        INSERT INTO tasks (
+            domain, project_id, title, due_date, status, priority, notes,
+            duration_minutes, scheduled_start, scheduled_end, is_fixed, recurrence_rule
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        RETURNING id, domain, project_id, title, due_date, status, priority, notes,
+                  duration_minutes, scheduled_start, scheduled_end, is_fixed, recurrence_rule,
+                  created_at, updated_at
         """,
-        norm_domain, project_id, title.strip(), due_date, norm_status, norm_priority, notes
+        norm_domain, project_id, title.strip(), due_date, norm_status, norm_priority, notes,
+        int(duration_minutes) if duration_minutes is not None else 60,
+        scheduled_start, scheduled_end, bool(is_fixed), recurrence_rule
     )
     return dict(row) if row else {}
 
 
 async def get_task(conn: DbConn, task_id: int) -> Optional[dict]:
-    """Retrieve a task by ID including project details."""
+    """Retrieve a task by ID including project details and scheduling metadata."""
     row = await conn.fetchrow(
         """
         SELECT t.id, t.domain, t.title, t.due_date, t.status, t.priority, t.notes,
+               t.duration_minutes, t.scheduled_start, t.scheduled_end, t.is_fixed, t.recurrence_rule,
                t.created_at, t.updated_at,
                p.id AS project_id, p.name AS project_name
         FROM tasks t
@@ -175,10 +188,13 @@ async def list_tasks(
     project_id: Optional[int] = None,
     status: Optional[str] = None,
     due_before: Optional[date] = None,
+    scheduled_only: bool = False,
+    unscheduled_only: bool = False,
 ) -> list[dict]:
     """Query tasks with optional filters."""
     query = """
         SELECT t.id, t.domain, t.title, t.due_date, t.status, t.priority, t.notes,
+               t.duration_minutes, t.scheduled_start, t.scheduled_end, t.is_fixed, t.recurrence_rule,
                t.created_at, t.updated_at,
                p.id AS project_id, p.name AS project_name
         FROM tasks t
@@ -199,8 +215,12 @@ async def list_tasks(
     if due_before:
         params.append(due_before)
         query += f" AND t.due_date <= ${len(params)}"
+    if scheduled_only:
+        query += " AND t.scheduled_start IS NOT NULL"
+    if unscheduled_only:
+        query += " AND t.scheduled_start IS NULL"
 
-    query += " ORDER BY t.due_date ASC NULLS LAST, t.id ASC"
+    query += " ORDER BY t.scheduled_start ASC NULLS LAST, t.due_date ASC NULLS LAST, t.id ASC"
 
     rows = await conn.fetch(query, *params)
     results = []
@@ -219,8 +239,11 @@ async def update_task(
     task_id: int,
     **kwargs: Any
 ) -> Optional[dict]:
-    """Update task fields dynamically (e.g. status, priority, due_date, notes) with normalization."""
-    allowed_fields = {"domain", "project_id", "title", "due_date", "status", "priority", "notes"}
+    """Update task fields dynamically (e.g. status, priority, due_date, notes, scheduling fields) with normalization."""
+    allowed_fields = {
+        "domain", "project_id", "title", "due_date", "status", "priority", "notes",
+        "duration_minutes", "scheduled_start", "scheduled_end", "is_fixed", "recurrence_rule"
+    }
     updates = {k: v for k, v in kwargs.items() if k in allowed_fields}
 
     if not updates:
@@ -236,6 +259,11 @@ async def update_task(
     if "priority" in updates and updates["priority"]:
         p_val = str(updates["priority"]).lower().strip()
         updates["priority"] = PRIORITY_MAP.get(p_val, "medium")
+    if "duration_minutes" in updates and updates["duration_minutes"] is not None:
+        try:
+            updates["duration_minutes"] = int(updates["duration_minutes"])
+        except (ValueError, TypeError):
+            updates["duration_minutes"] = 60
 
     set_clauses = []
     params: list[Any] = [task_id]
@@ -260,3 +288,69 @@ async def delete_task(conn: DbConn, task_id: int) -> bool:
     """Delete a task by ID."""
     result = await conn.execute("DELETE FROM tasks WHERE id = $1", task_id)
     return result == "DELETE 1"
+
+
+# ---------------------------------------------------------------------------
+# Scheduling Preferences & Calendar Connections
+# ---------------------------------------------------------------------------
+
+async def get_scheduling_preferences(conn: DbConn, user_id: str = "default_user") -> dict:
+    """Get scheduling preferences for a user, or defaults if not configured."""
+    row = await conn.fetchrow(
+        """
+        SELECT user_id, work_start_time, work_end_time, work_days, buffer_minutes, preferred_focus
+        FROM scheduling_preferences
+        WHERE user_id = $1
+        """,
+        user_id
+    )
+    if row:
+        res = dict(row)
+        if hasattr(res["work_start_time"], "strftime"):
+            res["work_start_time"] = res["work_start_time"].strftime("%H:%M:%S")
+        if hasattr(res["work_end_time"], "strftime"):
+            res["work_end_time"] = res["work_end_time"].strftime("%H:%M:%S")
+        return res
+
+    return {
+        "user_id": user_id,
+        "work_start_time": "09:00:00",
+        "work_end_time": "18:00:00",
+        "work_days": [1, 2, 3, 4, 5],
+        "buffer_minutes": 15,
+        "preferred_focus": "morning"
+    }
+
+
+async def update_scheduling_preferences(
+    conn: DbConn,
+    user_id: str = "default_user",
+    **kwargs: Any
+) -> dict:
+    """Update or insert scheduling preferences for a user."""
+    allowed = {"work_start_time", "work_end_time", "work_days", "buffer_minutes", "preferred_focus"}
+    updates = {k: v for k, v in kwargs.items() if k in allowed}
+
+    # Ensure row exists
+    await conn.execute(
+        """
+        INSERT INTO scheduling_preferences (user_id, work_start_time, work_end_time, work_days, buffer_minutes, preferred_focus)
+        VALUES ($1, '09:00:00', '18:00:00', '{1,2,3,4,5}', 15, 'morning')
+        ON CONFLICT (user_id) DO NOTHING
+        """,
+        user_id
+    )
+
+    if not updates:
+        return await get_scheduling_preferences(conn, user_id)
+
+    set_clauses = []
+    params: list[Any] = [user_id]
+    for k, v in updates.items():
+        params.append(v)
+        set_clauses.append(f"{k} = ${len(params)}")
+
+    query = f"UPDATE scheduling_preferences SET {', '.join(set_clauses)} WHERE user_id = $1"
+    await conn.execute(query, *params)
+    return await get_scheduling_preferences(conn, user_id)
+

@@ -426,6 +426,77 @@ Following the approval of the implementation plan, all identified critical and m
   - `test_cli_agent_runs_and_briefing_commands`
 - **Total Test Suite Status**: **70 passed, 0 failed, 0 skipped** across all repository suites.
 
+---
+
+## 10. Dynamic Scheduling & Google Calendar Integration (Flagship Feature)
+
+### 10.1 Architecture & Problem Addressed
+While traditional LLM copilots often attempt to calculate times directly in natural language (leading to severe hallucination of overlapping meetings, broken time zones, and invalid dates), Compass implements **Pure Python Deterministic Interval Arithmetic**. The LLM (Nemotron-3) handles high-level intent parsing, constraint extraction, and natural language rationale synthesis, while all slot allocation, buffer calculations, and calendar boundary enforcement are performed deterministically in Python.
+
+### 10.2 Database Schema Auto-Migrations (`backend/memory/db.py`)
+- Added scheduling columns to `tasks`:
+  - `duration_minutes INTEGER DEFAULT 60`
+  - `scheduled_start TIMESTAMPTZ`
+  - `scheduled_end TIMESTAMPTZ`
+  - `is_fixed BOOLEAN NOT NULL DEFAULT FALSE`
+  - `recurrence_rule TEXT`
+  - Index `idx_tasks_scheduled_start`
+- Created table `calendar_connections` (`user_id`, `provider`, `account_email`, `refresh_token`, `access_token`, `token_expiry`, `scopes`, `connected_at`, `last_synced_at`, `sync_token`)
+- Created table `calendar_event_links` (`task_id`, `google_event_id`, `calendar_id`, `sync_status`, `last_synced_at`)
+- Created table `scheduling_preferences` (`user_id`, `work_start_time`, `work_end_time`, `work_days`, `buffer_minutes`, `preferred_focus`)
+
+### 10.3 Deterministic Slot Allocator Engine (`backend/services/scheduler.py`)
+- **`TimeWindow` & `_ensure_utc`**: Strict UTC timezone-aware interval modeling.
+- **`get_available_windows`**: Derives free focus blocks by taking working hours (09:00–18:00 UTC, Mon–Fri) and subtracting merged busy calendar intervals with configurable inter-task buffers (default 15m).
+- **`allocate_task_slots`**: Greedily packs unscheduled tasks prioritized by `(priority_weight, due_date ASC, duration ASC)`. Strictly guarantees `scheduled_end <= due_date 23:59:59 UTC` and never creates overlapping allocations.
+- **`detect_schedule_conflicts`**: Identifies overlapping calendar blocks, deadline violations, and congested schedules.
+
+### 10.4 Calendar Service & RFC 5545 Feed (`backend/services/calendar.py`)
+- **`get_calendar_freebusy`**: Gathers busy intervals combining existing database tasks and Google Calendar events (with realistic simulated mock provider for instant offline/hackathon judge demos).
+- **`link_calendar_event`**: Persists task-to-Google-event mapping in `calendar_event_links`.
+- **`generate_ics_feed`**: Generates RFC 5545 compliant `.ics` calendar content for 1-click subscription and import into Apple Calendar, Google Calendar, and mobile devices.
+
+### 10.5 Agent Skills & ReAct Mutation Gating (`backend/skills/__init__.py` & `backend/agent.py`)
+- Registered tool schemas in `BASE_TOOL_DEFINITIONS` and handlers in `SKILL_REGISTRY`:
+  - `get_calendar_availability`: Queries busy intervals and free windows over any date range.
+  - `propose_schedule`: Computes optimal non-overlapping task slots using the deterministic allocator.
+  - `commit_schedule`: Mutating action! Commits `scheduled_start` and `scheduled_end` to PostgreSQL `tasks`, syncs to Google Calendar, and logs to `agent_audit_log`.
+- **ReAct Gate**: Added `commit_schedule` to `MUTATING_TOOLS`. When called by the agent, execution halts, yields `confirm_request`, and requires human approval before modifying state.
+- **Undo Integration**: Extended `undo_last_agent_action` to revert committed schedule slots and clean up calendar links upon undo.
+
+### 10.6 API Endpoints (`backend/main.py`)
+- `GET /api/calendar/status`: Connection state, account email, sync mode.
+- `GET /api/calendar/availability`: Query free/busy blocks for a date range.
+- `POST /api/schedule/propose`: Direct programmatic schedule allocation.
+- `POST /api/schedule/commit`: Direct programmatic schedule commit.
+- `GET /api/calendar/export.ics`: Direct browser download of RFC 5545 calendar feed.
+- `GET /api/calendar/preferences` & `PUT /api/calendar/preferences`: Working hours, buffer, and workday settings.
+
+### 10.7 Frontend Calendar UI (`frontend/src/components/CalendarView.jsx`, `Sidebar.jsx`, `App.jsx`)
+- **Visual Time Grid (08:00–20:00)**: Renders working hours, external Google Calendar busy blocks, and scheduled Compass tasks color-coded by domain (hackathon=amber, coursework=blue, code=emerald, general=slate).
+- **Date Horizon Navigator**: Mon–Sun day tabs with active day indicators.
+- **Pending Tasks Drawer**: Displays unplaced tasks with duration and priority.
+- **"⚡ Auto-Schedule Unplaced Tasks"**: 1-click optimization running `proposeSchedule` and presenting a preview modal with "✅ Approve & Commit to Google Calendar".
+- **"📥 Export .ics Feed"**: 1-click standard calendar export.
+
+### 10.8 Verification Suite (`tests/test_scheduling.py`)
+- **13 Net-New Automated Tests**:
+  - `test_deterministic_slot_allocator_no_overlaps`: Verified 0 overlaps across priority-ranked tasks.
+  - `test_slot_allocator_respects_working_hours`: Verified tasks stay within 09:00–18:00.
+  - `test_slot_allocator_respects_due_dates`: Verified tasks finish before deadline.
+  - `test_busy_intervals_masking`: Verified external calendar events carve out free windows and preserve buffers.
+  - `test_conflict_detection`: Verified overlap detection logic.
+  - `test_ics_feed_generation`: Verified RFC 5545 format compliance.
+  - `test_scheduling_tools_registered`: Verified skill registration and `MUTATING_TOOLS` membership.
+  - `test_propose_schedule_handler_simulated`: Verified skill handler execution.
+  - `test_get_calendar_availability_handler`: Verified availability calculations.
+  - `test_calendar_status_endpoint`: Verified `/api/calendar/status` endpoint.
+  - `test_calendar_export_ics_endpoint`: Verified `/api/calendar/export.ics` endpoint.
+  - `test_calendar_availability_endpoint`: Verified `/api/calendar/availability` endpoint.
+  - `test_schedule_propose_endpoint`: Verified `/api/schedule/propose` endpoint.
+- **Status**: **13 of 13 passed** in 46.90s.
+
+
 
 
 

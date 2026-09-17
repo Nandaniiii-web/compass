@@ -3,6 +3,7 @@ import Sidebar from './components/Sidebar'
 import Timeline from './components/Timeline'
 import ChatPanel from './components/ChatPanel'
 import AgentPanel from './components/AgentPanel'
+import CalendarView from './components/CalendarView'
 import { checkBackendHealth, fetchTasks, sendQueryToAssistant, fetchUsageSummary } from './api/client'
 
 export default function App() {
@@ -184,6 +185,21 @@ export default function App() {
               }}>
               🧠 Agent Planner
             </button>
+            <button
+              id="tab-calendar"
+              onClick={() => setActiveTab('calendar')}
+              style={{
+                padding: '7px 14px',
+                borderRadius: '6px',
+                border: 'none',
+                background: activeTab === 'calendar' ? '#1e293b' : 'transparent',
+                color: activeTab === 'calendar' ? '#fff' : '#64748b',
+                cursor: 'pointer',
+                fontWeight: '500',
+                fontSize: '13px'
+              }}>
+              🗓️ Schedule & Calendar
+            </button>
           </div>
           {/* P0.2: Live usage counter — updates after every chat message */}
           <div id="usage-badge" className="header-model-badge" style={{ fontSize: '11px', color: '#64748b', fontFamily: 'JetBrains Mono, monospace' }}>
@@ -196,6 +212,15 @@ export default function App() {
             tasks={tasks}
             activeDomain={selectedDomain}
             onSelectDomain={setSelectedDomain}
+          />
+        ) : activeTab === 'calendar' ? (
+          <CalendarView
+            tasks={tasks}
+            activeDomain={selectedDomain}
+            onTasksUpdated={() => {
+              loadTasks(selectedDomain)
+              refreshUsage()
+            }}
           />
         ) : activeTab === 'agent' ? (
           <AgentPanel
