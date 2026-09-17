@@ -1,0 +1,36 @@
+<!--
+progress.txt — running log of completed PRD.md tasks.
+
+As each task in PRD.md is finished, append one line here in the form:
+[YYYY-MM-DD HH:MM] Phase N — <task description as it appears in PRD.md>
+
+Keep entries in the order completed. Don't rewrite or delete prior entries.
+This file is a log, not a summary — the checkbox state in PRD.md is the
+source of truth for what's done; this file is just the timestamped record
+of when.
+-->
+[2026-09-17 12:20] Phase 1 — Add a task_dependencies table with auto-migration matching backend/memory/db.py
+[2026-09-17 12:22] Phase 1 — Add GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI to backend/config.py and .env.example
+[2026-09-17 12:23] Phase 1 — Add google-auth, google-auth-oauthlib, google-api-python-client to backend/requirements.txt
+[2026-09-17 12:25] Phase 1 — Create backend/services/crypto.py with symmetric encrypt/decrypt helper
+[2026-09-17 12:26] Phase 1 — Enforce singleton semantics on calendar_connections table
+[2026-09-17 12:30] Phase 2 — Create GET /api/calendar/connect redirecting to Google OAuth consent
+[2026-09-17 12:32] Phase 2 — Create GET /api/calendar/callback exchanging code for encrypted tokens and upserting singleton
+[2026-09-17 12:33] Phase 2 — Create POST /api/calendar/disconnect revoking token and removing calendar_connections row
+[2026-09-17 12:35] Phase 2 — Update GET /api/calendar/status to report real connection state
+[2026-09-17 12:36] Phase 2 — Add token-refresh helper proactively refreshing before expiry
+[2026-09-17 12:38] Phase 3 — Modify free/busy fetch to query Google freebusy.query when connected with simulated fallback
+[2026-09-17 12:39] Phase 3 — Add UTC normalization helper for Google event times
+[2026-09-17 12:40] Phase 3 — Update get_calendar_availability skill handler to use transparent live/simulated source
+[2026-09-17 12:41] Phase 3 — Add explicit source field to GET /api/calendar/status and badge in CalendarView.jsx
+[2026-09-17 12:42] Phase 4 — Add find_missed_scheduled_tasks / find_slipped_tasks to backend/services/scheduler.py
+[2026-09-17 12:43] Phase 4 — Add check_slipped_schedules to nightly consolidation in backend/jobs/consolidate.py
+[2026-09-17 12:44] Phase 4 — Ensure re-plan reuses confirm_request human gate before committing schedule
+[2026-09-17 12:45] Phase 4 — Add POST /api/schedule/reactive-check for on-demand scan and re-planning
+[2026-09-17 12:46] Phase 4 — Add dependency-graph walk helper in backend/memory/structured.py
+[2026-09-17 12:47] Phase 4 — Scope reactive re-plan to missed tasks plus downstream dependents
+[2026-09-17 12:48] Phase 5 — Register detect_schedule_conflicts tool and handler for overlaps, collisions, and slips
+[2026-09-17 12:48] Phase 5 — Wire detect_schedule_conflicts into reactive check and GET /api/schedule/conflicts
+[2026-09-17 12:49] Phase 6 — Add task dependency selector and dependency badges in CalendarView.jsx
+[2026-09-17 12:49] Phase 7 — Add Simulated / Live badge in CalendarView.jsx and honest documentation in README.md & CHANGES.md
+[2026-09-17 12:50] Phase 8 — Write tests/test_reactive_scheduling.py covering OAuth crypto, mock exchange, slips, scoping, and human gate
