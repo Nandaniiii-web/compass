@@ -173,62 +173,60 @@ function TaskDetailModal({ task, onClose }) {
   )
 }
 
+const DOMAIN_META = {
+  hackathon: { label: 'Hackathon', icon: '🚀', color: '#fbbf24' },
+  coursework: { label: 'Coursework', icon: '📚', color: '#60a5fa' },
+  code: { label: 'Code', icon: '💻', color: '#34d399' },
+  general: { label: 'General', icon: '🌐', color: '#94a3b8' },
+}
+
 export default function Timeline({ tasks, activeDomain, onSelectDomain }) {
   const [selectedTask, setSelectedTask] = useState(null)
   const filtered = activeDomain === 'all' ? tasks : tasks.filter(t => t.domain === activeDomain)
+  const today = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' })
 
   return (
-    <div style={{ padding: '20px', overflowY: 'auto', flex: 1, minWidth: 0 }}>
-      {/* Header & Filter Bar */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '18px', flexWrap: 'wrap', gap: '10px' }}>
-        <div>
-          <h2 style={{ fontSize: '17px', fontWeight: '600', color: '#f8fafc', letterSpacing: '-0.2px' }}>
-            Synchronized Context Stream
-          </h2>
-          <p style={{ fontSize: '12px', color: '#64748b' }}>
-            Multi-domain vector memory logs synced from CLI and backend
-          </p>
-        </div>
-        <div style={{ display: 'flex', gap: '6px' }}>
-          {['all', 'hackathon', 'coursework', 'code', 'general'].map(dom => (
-            <button
-              key={dom}
-              onClick={() => onSelectDomain(dom)}
-              style={{
-                padding: '5px 11px',
-                borderRadius: '6px',
-                fontSize: '11.5px',
-                background: activeDomain === dom ? '#334155' : '#1e293b',
-                border: activeDomain === dom ? '1px solid #475569' : '1px solid #1e293b',
-                color: activeDomain === dom ? '#fff' : '#94a3b8',
-                cursor: 'pointer',
-                textTransform: 'capitalize',
-                fontWeight: '500',
-                transition: 'all 0.15s ease'
-              }}>
-              {dom}
-            </button>
-          ))}
-        </div>
+    <div style={{ padding: '28px 32px', overflowY: 'auto', flex: 1, minWidth: 0, background: 'var(--bg-app)' }}>
+      {/* Header */}
+      <div style={{ marginBottom: '22px' }}>
+        <h2 style={{ fontSize: '24px', fontWeight: '800', color: 'var(--text-primary)', letterSpacing: '-0.4px' }}>
+          Timeline Feed <span className="serif-accent" style={{ color: 'var(--text-secondary)', fontWeight: '600' }}>— {today}</span>
+        </h2>
+        <p style={{ fontSize: '13px', color: 'var(--text-muted)', marginTop: '4px' }}>
+          What's happening across your workspace today
+        </p>
+      </div>
+
+      {/* Filter pills */}
+      <div style={{ display: 'flex', gap: '8px', marginBottom: '22px', flexWrap: 'wrap' }}>
+        {['all', 'hackathon', 'coursework', 'code', 'general'].map(dom => (
+          <button
+            key={dom}
+            onClick={() => onSelectDomain(dom)}
+            className={`filter-pill ${activeDomain === dom ? 'active' : ''}`}
+          >
+            {dom}
+          </button>
+        ))}
       </div>
 
       {/* Task Stream Feed */}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '14px', maxWidth: '820px' }}>
         {filtered.length === 0 ? (
           <div style={{
-            padding: '40px 20px',
+            padding: '48px 20px',
             textAlign: 'center',
-            background: '#111827',
-            borderRadius: '10px',
-            border: '1px dashed #334155',
-            color: '#94a3b8',
+            background: 'var(--bg-card)',
+            borderRadius: '16px',
+            border: '1px dashed var(--border)',
+            color: 'var(--text-secondary)',
             marginTop: '10px'
           }}>
-            <div style={{ fontSize: '28px', marginBottom: '10px' }}>📭</div>
-            <div style={{ fontSize: '15px', fontWeight: '600', color: '#f8fafc', marginBottom: '6px' }}>
+            <div style={{ fontSize: '30px', marginBottom: '10px' }}>📭</div>
+            <div style={{ fontSize: '16px', fontWeight: '700', color: 'var(--text-primary)', marginBottom: '6px' }}>
               No tasks found
             </div>
-            <div style={{ fontSize: '12px', color: '#64748b' }}>
+            <div style={{ fontSize: '13px', color: 'var(--text-muted)' }}>
               {activeDomain === 'all'
                 ? "Your memory stream is clear. Add tasks via CLI ('compass add ...') or in the Chat tab."
                 : `No active tasks found under ${activeDomain.toUpperCase()} domain.`}
@@ -236,6 +234,7 @@ export default function Timeline({ tasks, activeDomain, onSelectDomain }) {
           </div>
         ) : filtered.map(task => {
           const isOverdue = (task.countdown || '').toLowerCase().includes('overdue')
+          const meta = DOMAIN_META[task.domain] || DOMAIN_META.general
 
           return (
             <div
@@ -251,57 +250,59 @@ export default function Timeline({ tasks, activeDomain, onSelectDomain }) {
                 }
               }}
               style={{
-                background: '#111827',
-                padding: '16px',
-                borderRadius: '10px',
-                border: '1px solid #1f2937',
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'flex-start',
-                gap: '14px',
+                background: 'var(--bg-card)',
+                padding: '18px 20px',
+                borderRadius: '14px',
+                border: '1px solid var(--border)',
+                boxShadow: 'var(--shadow-sm)',
                 cursor: 'pointer'
               }}>
-              {/* Left Column: Domain Badge, Project, Timestamp, Title, Tags */}
-              <div style={{ flex: 1, minWidth: '180px' }}>
-                <div style={{ display: 'flex', gap: '8px', alignItems: 'center', marginBottom: '8px', flexWrap: 'wrap' }}>
-                  <span className={`badge-${task.domain}`} style={{ fontSize: '10.5px', padding: '2px 7px', borderRadius: '5px', textTransform: 'uppercase', fontWeight: '700' }}>
-                    {task.domain}
-                  </span>
-                  <span style={{ fontSize: '12px', color: '#94a3b8', fontWeight: '500' }}>
-                    • {task.project}
-                  </span>
-                  <span style={{ fontSize: '11px', color: '#64748b' }}>
-                    • {task.timestamp}
-                  </span>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '14px', marginBottom: '10px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                  <div style={{
+                    width: '36px',
+                    height: '36px',
+                    borderRadius: '10px',
+                    background: 'var(--bg-card-soft)',
+                    border: '1px solid var(--border)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    fontSize: '17px',
+                    flexShrink: 0
+                  }}>
+                    {meta.icon}
+                  </div>
+                  <div>
+                    <div style={{ fontSize: '13.5px', fontWeight: '700', color: 'var(--text-primary)' }}>{task.project}</div>
+                    <div style={{ fontSize: '11.5px', color: 'var(--text-muted)' }}>{task.timestamp}</div>
+                  </div>
                 </div>
+                <span className={`badge-${task.domain}`} style={{ fontSize: '10.5px', padding: '3px 9px', borderRadius: '20px', textTransform: 'uppercase', fontWeight: '700', flexShrink: 0 }}>
+                  {meta.label}
+                </span>
+              </div>
 
-                <div style={{ fontSize: '14px', fontWeight: '500', color: '#f8fafc', marginBottom: '10px', lineHeight: '1.4' }}>
-                  {task.title}
-                </div>
+              <div style={{ fontSize: '15px', fontWeight: '600', color: 'var(--text-primary)', marginBottom: '12px', lineHeight: '1.4' }}>
+                {task.title}
+              </div>
 
-                <div style={{ display: 'flex', gap: '5px', flexWrap: 'wrap' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px' }}>
+                <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
                   {(task.tags || []).map(tag => (
-                    <span key={tag} style={{ fontSize: '10.5px', background: '#1e293b', color: '#94a3b8', padding: '2px 7px', borderRadius: '4px' }}>
+                    <span key={tag} style={{ fontSize: '10.5px', background: 'var(--bg-card-soft)', color: 'var(--text-secondary)', padding: '2px 8px', borderRadius: '20px', border: '1px solid var(--border)' }}>
                       #{tag}
                     </span>
                   ))}
                 </div>
-              </div>
-
-              {/* Right Column: Countdown Badge & Dimension Tag (Guaranteed Right-Aligned, Non-Wrapping) */}
-              <div style={{
-                display: 'flex',
-                flexDirection: 'column',
-                alignItems: 'flex-end',
-                flexShrink: 0,
-                whiteSpace: 'nowrap'
-              }}>
-                <div className={`countdown-badge ${isOverdue ? 'countdown-overdue' : ''}`} style={{ marginBottom: '6px', whiteSpace: 'nowrap' }}>
-                  {isOverdue && '⚠️ '}
-                  {task.countdown}
-                </div>
-                <div className="vector-tag" style={{ whiteSpace: 'nowrap' }}>
-                  {task.vector_dim || 768}-dim embedded
+                <div style={{ display: 'flex', gap: '6px', alignItems: 'center', flexShrink: 0 }}>
+                  <div className={`countdown-badge ${isOverdue ? 'countdown-overdue' : ''}`}>
+                    {isOverdue && '⚠️ '}
+                    {task.countdown}
+                  </div>
+                  <div className="vector-tag">
+                    {task.vector_dim || 768}-dim
+                  </div>
                 </div>
               </div>
             </div>

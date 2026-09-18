@@ -147,6 +147,7 @@ export default function App() {
         backendStatus={backendStatus}
         activeTab={activeTab}
         onSelectTab={setActiveTab}
+        usageBadge={usageBadge}
       />
 
       <main style={{ flex: 1, display: 'flex', flexDirection: 'column', background: '#0b0f17', minWidth: 0, overflow: 'hidden' }}>
