@@ -2,10 +2,92 @@
 Compass — CLI Command Tests via Typer CliRunner.
 """
 
+import pytest
 from typer.testing import CliRunner
 from cli.assistant_cli import app
 
 runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def mock_cli_network(monkeypatch):
+    """Hermetically mock CLI HTTP calls so tests do not depend on an external running server."""
+    from cli import assistant_cli
+
+    def mock_get(path: str, params: dict | None = None) -> dict:
+        if "/dashboard" in path:
+            return {
+                "domains": {
+                    "hackathon": {
+                        "project_count": 2,
+                        "open_task_count": 4,
+                        "nearest_deadline": {"title": "AI Hackathon Milestone", "due_date": "2026-09-21"},
+                    },
+                    "coursework": {
+                        "project_count": 3,
+                        "open_task_count": 2,
+                        "nearest_deadline": {"title": "OS Homework 2", "due_date": "2026-09-22"},
+                    },
+                    "code": {
+                        "project_count": 1,
+                        "open_task_count": 1,
+                        "nearest_deadline": None,
+                    },
+                },
+                "total_open_tasks": 7,
+                "total_projects": 6,
+            }
+        elif "/projects" in path:
+            return {
+                "projects": [
+                    {"id": 1, "name": "AI Hackathon", "domain": "hackathon", "status": "active"},
+                    {"id": 2, "name": "Operating Systems", "domain": "coursework", "status": "active"},
+                    {"id": 3, "name": "Compass Engine", "domain": "code", "status": "active"},
+                ]
+            }
+        elif "/tasks" in path:
+            return {
+                "tasks": [
+                    {
+                        "id": 101,
+                        "title": "Complete PRD Implementation",
+                        "domain": "hackathon",
+                        "status": "open",
+                        "priority": "high",
+                        "due_date": "2026-09-21",
+                        "project": {"name": "AI Hackathon"},
+                    }
+                ]
+            }
+        return {}
+
+    def mock_post(path: str, data: dict) -> dict:
+        if "/api/log" in path or "/memory/log" in path:
+            return {
+                "status": "ok",
+                "message": "Memory logged successfully",
+                "entry_id": 42,
+            }
+        elif "/chat" in path:
+            return {
+                "response": "Added task: CLI REPL verification task\nwhen is it due? It is due on 2026-09-21.",
+                "conversation_id": "conv_repl_123",
+                "skill_used": "add_task",
+            }
+        return {}
+
+    def mock_stream_chat(payload: dict) -> tuple[str, str | None, str | None]:
+        msg = payload.get("message", "")
+        if "add a task" in msg.lower():
+            resp = "Added task: CLI REPL verification task"
+        else:
+            resp = "Task deadline is 2026-09-21."
+        assistant_cli.console.print(resp)
+        return resp, "conv_repl_123", "add_task"
+
+    monkeypatch.setattr(assistant_cli, "_get", mock_get)
+    monkeypatch.setattr(assistant_cli, "_post", mock_post)
+    monkeypatch.setattr(assistant_cli, "_stream_chat", mock_stream_chat)
 
 
 def test_cli_help():

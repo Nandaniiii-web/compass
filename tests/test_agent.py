@@ -681,10 +681,19 @@ async def test_demo_reject_scenario_execution(client: AsyncClient):
     pool = await get_pool()
     demo_run_id = f"demo_rej_{uuid.uuid4().hex[:6]}"
 
+    mock_client = MagicMock()
+    mock_client.chat = MagicMock()
+    mock_client.chat.completions = MagicMock()
+    mock_client.chat.completions.create = AsyncMock(side_effect=[
+        _create_mock_completion(content="Rescheduled conflicting tasks into next available slots without altering OS Homework 2."),
+        _create_mock_completion(content="Self-critique pass: all constraints satisfied."),
+    ])
+
     # Simulate resuming with action='reject' and feedback
     events = []
     async for step in run_agent(
         goal="Detect deadline conflicts between hackathon deliverables and coursework and reschedule",
+        client=mock_client,
         pool=pool,
         run_id=demo_run_id,
         action="reject",
