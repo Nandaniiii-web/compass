@@ -186,7 +186,7 @@ export default function Timeline({ tasks, activeDomain, onSelectDomain }) {
   const today = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' })
 
   return (
-    <div style={{ padding: '28px 32px', overflowY: 'auto', flex: 1, minWidth: 0, background: 'var(--bg-app)' }}>
+    <div className="timeline-container" style={{ background: 'var(--bg-app)' }}>
       {/* Header */}
       <div style={{ marginBottom: '22px' }}>
         <h2 style={{ fontSize: '24px', fontWeight: '800', color: 'var(--text-primary)', letterSpacing: '-0.4px' }}>
@@ -211,7 +211,7 @@ export default function Timeline({ tasks, activeDomain, onSelectDomain }) {
       </div>
 
       {/* Task Stream Feed */}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '14px', maxWidth: '820px' }}>
+      <div className="timeline-feed">
         {filtered.length === 0 ? (
           <div style={{
             padding: '48px 20px',
@@ -220,7 +220,9 @@ export default function Timeline({ tasks, activeDomain, onSelectDomain }) {
             borderRadius: '16px',
             border: '1px dashed var(--border)',
             color: 'var(--text-secondary)',
-            marginTop: '10px'
+            marginTop: '10px',
+            width: '100%',
+            boxSizing: 'border-box'
           }}>
             <div style={{ fontSize: '30px', marginBottom: '10px' }}>📭</div>
             <div style={{ fontSize: '16px', fontWeight: '700', color: 'var(--text-primary)', marginBottom: '6px' }}>
@@ -239,7 +241,7 @@ export default function Timeline({ tasks, activeDomain, onSelectDomain }) {
           return (
             <div
               key={task.id}
-              className={`card-${task.domain}`}
+              className={`timeline-card card-${task.domain}`}
               onClick={() => setSelectedTask(task)}
               role="button"
               tabIndex={0}
@@ -249,15 +251,8 @@ export default function Timeline({ tasks, activeDomain, onSelectDomain }) {
                   setSelectedTask(task)
                 }
               }}
-              style={{
-                background: 'var(--bg-card)',
-                padding: '18px 20px',
-                borderRadius: '14px',
-                border: '1px solid var(--border)',
-                boxShadow: 'var(--shadow-sm)',
-                cursor: 'pointer'
-              }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '14px', marginBottom: '10px' }}>
+            >
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '14px', marginBottom: '10px', flexWrap: 'wrap' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                   <div style={{
                     width: '36px',

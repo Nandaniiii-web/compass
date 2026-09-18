@@ -236,6 +236,33 @@ code, pre, .mono {
   box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
 }
 
+.timeline-container {
+  padding: 28px 32px;
+  overflow-y: auto;
+  flex: 1;
+  min-width: 0;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.timeline-feed {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  width: 100%;
+}
+
+.timeline-card {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--bg-card);
+  padding: 18px 20px;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-sm);
+  cursor: pointer;
+}
+
 /* ==========================================================================
    Router Latency & Token Streaming Visuals
    ========================================================================== */
@@ -280,6 +307,9 @@ code, pre, .mono {
     min-width: 200px !important;
     padding: 16px 10px !important;
   }
+  .timeline-container {
+    padding: 20px 20px !important;
+  }
   .card-hackathon, .card-coursework, .card-code {
     padding: 12px !important;
     gap: 10px !important;
@@ -309,6 +339,12 @@ code, pre, .mono {
   }
   main {
     height: calc(100vh - 120px) !important;
+  }
+  .timeline-container {
+    padding: 16px 12px !important;
+  }
+  .timeline-card {
+    padding: 14px 14px !important;
   }
   .card-hackathon, .card-coursework, .card-code, .card-general {
     flex-direction: column !important;
